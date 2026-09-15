@@ -149,8 +149,11 @@ def is_emotional_support(query: str) -> bool:
 
 
 def has_medical_context(query: str) -> bool:
-    signals = ["宝宝", "婴儿", "孩子", "新生儿", "月龄", "发烧", "发热", "咳嗽", "呕吐", "腹泻", "不会坐", "发育", "症状", "疼", "出血", "奶量"]
-    return any(signal in query for signal in signals)
+    clinical_signals = ["发烧", "发热", "有点烫", "咳嗽", "呕吐", "吐了", "吐奶", "腹泻", "拉肚子", "不会坐", "发育", "症状", "疼", "出血", "奶量", "不吃奶", "不肯吃奶", "不肯吃饭", "哭闹", "脸色发黄", "黄疸", "湿疹", "拒奶", "呼吸", "疫苗", "辅食"]
+    age_or_child = ["宝宝", "婴儿", "孩子", "新生儿", "月龄"]
+    return any(signal in query for signal in clinical_signals) or (
+        any(signal in query for signal in age_or_child) and any(mark in query for mark in ["怎么办", "怎么", "是否", "能不能", "不会", "异常", "担心"])
+    )
 
 
 def classify_route(query: str) -> str | None:
@@ -170,7 +173,7 @@ def classify_route(query: str) -> str | None:
     body = json.dumps({"model": model, "temperature": 0, "messages": [{"role": "user", "content": prompt}]}).encode()
     request = Request(f"{base_url}/v1/chat/completions", data=body, headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"})
     try:
-        with urlopen(request, timeout=12) as response:
+        with urlopen(request, timeout=5) as response:
             payload = json.loads(response.read().decode())
         raw = payload["choices"][0]["message"]["content"].strip()
         parsed = json.loads(raw[raw.find("{") : raw.rfind("}") + 1])
