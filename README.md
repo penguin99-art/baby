@@ -10,6 +10,8 @@ python3 app.py
 
 打开 http://localhost:8000。当前只支持导入 `.md`，数据保存在 `data/knowledge.json`。
 
+页面右上角的“设置”可以临时配置 LLM 和 Embedding API，并测试连通性。网页配置只写入当前 Python 进程内存，不会保存 API Key；服务重启后请使用环境变量或重新在页面填写。生产环境建议接入 Secret Manager，并通过 HTTPS 和鉴权保护配置接口。
+
 ## API 配置
 
 配置文件示例见 `.env.example`。当前支持 OpenAI-compatible API：LLM 使用 `/v1/chat/completions`，Embedding 使用 `/v1/embeddings`。环境变量只在服务端读取，不能放进前端代码。

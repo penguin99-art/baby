@@ -23,6 +23,8 @@ SUPPORTED = {".md"}
 THRESHOLD = 0.24
 MAX_UPLOAD = 5 * 1024 * 1024
 STORE_LOCK = threading.Lock()
+CONFIG_LOCK = threading.Lock()
+APP_CONFIG: dict[str, str] = {}
 
 
 def ensure_store() -> list[dict]:
@@ -66,9 +68,9 @@ def chunks_for(name: str, text: str) -> list[dict]:
 
 
 def embedding(text: str) -> list[float] | None:
-    base_url = os.getenv("EMBEDDING_BASE_URL", os.getenv("LLM_BASE_URL", "")).rstrip("/")
-    api_key = os.getenv("EMBEDDING_API_KEY", os.getenv("LLM_API_KEY", ""))
-    model = os.getenv("EMBEDDING_MODEL", "")
+    base_url = setting("EMBEDDING_BASE_URL", setting("LLM_BASE_URL")).rstrip("/")
+    api_key = setting("EMBEDDING_API_KEY", setting("LLM_API_KEY"))
+    model = setting("EMBEDDING_MODEL")
     if not (base_url and api_key and model):
         return None
     body = json.dumps({"model": model, "input": text}).encode()
@@ -86,6 +88,10 @@ def cosine(left: list[float], right: list[float]) -> float:
     left_norm = sum(a * a for a in left) ** 0.5
     right_norm = sum(b * b for b in right) ** 0.5
     return dot / (left_norm * right_norm) if left_norm and right_norm else 0
+
+
+def setting(name: str, default: str = "") -> str:
+    return APP_CONFIG.get(name, os.getenv(name, default))
 
 
 def search(query: str, docs: list[dict], limit: int = 4) -> list[dict]:
@@ -124,9 +130,9 @@ def emergency_message(query: str) -> str | None:
 
 
 def call_llm(query: str, evidence: list[dict]) -> str | None:
-    base_url = os.getenv("LLM_BASE_URL", "").rstrip("/")
-    api_key = os.getenv("LLM_API_KEY", "")
-    model = os.getenv("LLM_MODEL", "")
+    base_url = setting("LLM_BASE_URL").rstrip("/")
+    api_key = setting("LLM_API_KEY")
+    model = setting("LLM_MODEL")
     if not (base_url and api_key and model):
         return None
     evidence = evidence[:3]
@@ -161,6 +167,19 @@ def answer(query: str, docs: list[dict]) -> dict:
     return {"status": "answered", "answer": text, "citations": evidence[:3], "reason": "已通过闭域证据门槛"}
 
 
+def public_config() -> dict:
+    def masked(value: str) -> str:
+        return f"{value[:4]}••••{value[-3:]}" if len(value) > 8 else ("已配置" if value else "")
+    return {
+        "llm_base_url": setting("LLM_BASE_URL"),
+        "llm_model": setting("LLM_MODEL"),
+        "llm_api_key": masked(setting("LLM_API_KEY")),
+        "embedding_base_url": setting("EMBEDDING_BASE_URL", setting("LLM_BASE_URL")),
+        "embedding_model": setting("EMBEDDING_MODEL"),
+        "embedding_api_key": masked(setting("EMBEDDING_API_KEY", setting("LLM_API_KEY"))),
+    }
+
+
 class Handler(BaseHTTPRequestHandler):
     def send_json(self, payload: dict, code: int = 200) -> None:
         data = json.dumps(payload, ensure_ascii=False).encode()
@@ -175,6 +194,9 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/docs":
             docs = ensure_store()
             self.send_json({"docs": [{"id": d["id"], "name": d["name"], "chunks": len(d["chunks"])} for d in docs]})
+            return
+        if path == "/api/config":
+            self.send_json(public_config())
             return
         target = (STATIC_DIR / ("index.html" if path == "/" else path.removeprefix("/"))).resolve()
         if target.is_file() and target.is_relative_to(STATIC_DIR.resolve()):
@@ -211,6 +233,27 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json({"error": "query must be a non-empty string under 500 characters"}, 400)
                 return
             self.send_json(answer(query.strip(), docs))
+            return
+        if path == "/api/config":
+            try:
+                payload = json.loads(body or b"{}")
+            except json.JSONDecodeError:
+                self.send_json({"error": "invalid JSON"}, 400)
+                return
+            allowed = {"LLM_BASE_URL", "LLM_API_KEY", "LLM_MODEL", "EMBEDDING_BASE_URL", "EMBEDDING_API_KEY", "EMBEDDING_MODEL"}
+            values = {key: str(payload[key]).strip() for key in allowed if key in payload and payload[key] is not None}
+            for key in ("LLM_BASE_URL", "EMBEDDING_BASE_URL"):
+                if key in values and values[key] and not values[key].startswith(("http://", "https://")):
+                    self.send_json({"error": f"{key} must start with http:// or https://"}, 400)
+                    return
+            with CONFIG_LOCK:
+                APP_CONFIG.update(values)
+            self.send_json({"ok": True, "config": public_config()})
+            return
+        if path == "/api/config/test":
+            llm_ok = bool(call_llm("只回复 OK", [{"name": "connection-test", "text": "OK"}]))
+            embedding_ok = bool(embedding("connection test"))
+            self.send_json({"llm": llm_ok, "embedding": embedding_ok})
             return
         if path == "/api/reset":
             with STORE_LOCK:
