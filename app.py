@@ -144,7 +144,7 @@ def high_risk_message(query: str) -> str | None:
 
 
 def is_emotional_support(query: str) -> bool:
-    signals = ["有点累", "好累", "很累", "太累了", "累坏了", "疲惫", "压力", "焦虑", "委屈", "难过", "孤单", "孤独", "没人理解", "想哭", "崩溃", "内疚", "自责", "不是好妈妈", "做不好", "我不配", "睡不着", "陪我聊", "听我说", "心情", "情绪", "困扰", "烦心"]
+    signals = ["有点累", "好累", "很累", "太累了", "累坏了", "疲惫", "想休息", "走不开", "喘口气", "一直被需要", "压力", "焦虑", "委屈", "难过", "孤单", "孤独", "没人理解", "想哭", "崩溃", "内疚", "自责", "不是好妈妈", "做不好", "我不配", "睡不着", "陪我聊", "听我说", "心情", "情绪", "困扰", "烦心"]
     return any(signal in query for signal in signals)
 
 
@@ -156,7 +156,7 @@ def has_medical_context(query: str) -> bool:
     )
 
 
-def classify_intent(query: str) -> dict | None:
+def classify_intent(query: str, history: list[dict] | None = None) -> dict | None:
     """Use the configured model for intent hints, never as a safety gate."""
     base_url = setting("LLM_BASE_URL").rstrip("/")
     api_key = setting("LLM_API_KEY")
@@ -167,7 +167,8 @@ def classify_intent(query: str) -> dict | None:
         "分析用户消息，只输出 JSON，不要解释。字段 emotion_present 和 knowledge_present 必须是 true/false。"
         "emotion_present=true 表示用户在表达感受或寻求倾听；knowledge_present=true 表示在询问母婴知识或照护事实。"
         "购物、品牌推荐、成人话题或其他无关内容的 knowledge_present=false。包含宝宝、婴儿、孩子或月龄，并涉及发烧、发热、咳嗽、呕吐、腹泻、疼痛、出血、拒奶、黄疸、湿疹、呼吸、发育、疫苗或辅食时，knowledge_present必须为true。请不要做安全判断。"
-        "格式必须是 {\"emotion_present\":false,\"knowledge_present\":true}。\n用户消息：" + query
+        "结合最近对话判断简短回应是否在延续情绪陪伴。格式必须是 {\"emotion_present\":false,\"knowledge_present\":true}。"
+        "\n最近对话：" + json.dumps((history or [])[-4:], ensure_ascii=False) + "\n用户消息：" + query
     )
     body = json.dumps({"model": model, "temperature": 0, "messages": [{"role": "user", "content": prompt}]}).encode()
     request = Request(f"{base_url}/v1/chat/completions", data=body, headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"})
@@ -201,6 +202,14 @@ def empathy_lead(query: str) -> str:
     if any(word in query for word in ["焦虑", "担心", "害怕", "不安"]):
         return "我能理解这件事让你有些担心，照护孩子时出现这样的不安很常见。"
     return "我能理解这件事让你有些困扰，你的感受值得被认真听见。"
+
+
+def continues_emotional_context(query: str, history: list[dict] | None) -> bool:
+    short_replies = {"好", "好的", "嗯", "嗯嗯", "是", "是的", "知道了", "我知道了", "谢谢", "谢谢你", "继续", "继续说", "可以", "好吧"}
+    normalized = re.sub(r"[，。！？!?\s]", "", query)
+    if normalized not in short_replies:
+        return False
+    return any(item.get("role") == "assistant" and item.get("route") in {"emotional_support", "mixed"} for item in (history or [])[-4:])
 
 
 def call_llm(query: str, evidence: list[dict]) -> str | None:
@@ -266,17 +275,20 @@ def answer(query: str, docs: list[dict], history: list[dict] | None = None) -> d
     high_risk = high_risk_message(query)
     if high_risk:
         return {"status": "refused", "route": "hard_refusal", "answer": high_risk, "citations": [], "reason": "命中高风险主题规则"}
-    intent = classify_intent(query)
+    intent = classify_intent(query, history)
     medical_context = has_medical_context(query)
-    emotion_present = intent["emotion_present"] if intent else is_emotional_support(query)
-    knowledge_present = intent["knowledge_present"] if intent else medical_context
+    emotional_continuation = continues_emotional_context(query, history)
+    emotion_present = bool(intent and intent["emotion_present"]) or is_emotional_support(query)
+    knowledge_present = bool(intent and intent["knowledge_present"]) or medical_context
+    if emotional_continuation:
+        emotion_present = True
     if medical_context:
         knowledge_present = True
     if emotion_present and not knowledge_present:
         generated = call_emotional_llm(query, history)
         unsafe = re.compile(r"(你有抑郁|你是焦虑症|我能治好|保证会好|只要积极|只能依赖我|处方|剂量|停药|换药|诊断为)", re.I)
         if not generated or unsafe.search(generated):
-            generated = emotional_fallback(query)
+            generated = "嗯，那就先让自己缓一会儿，不急着继续说。我在这里。" if emotional_continuation else emotional_fallback(query)
         return {"status": "supported", "route": "emotional_support", "answer": generated, "citations": [], "reason": "情绪支持通道"}
     evidence = [item for item in search(query, docs) if item["score"] >= THRESHOLD]
     if not evidence or evidence[0]["score"] < THRESHOLD:
@@ -359,10 +371,10 @@ class Handler(BaseHTTPRequestHandler):
             if not isinstance(query, str) or not query.strip() or len(query) > 500:
                 self.send_json({"error": "query must be a non-empty string under 500 characters"}, 400)
                 return
-            if not isinstance(history, list) or len(history) > 10 or any(not isinstance(item, dict) or item.get("role") not in {"user", "assistant"} or not isinstance(item.get("content"), str) for item in history):
+            if not isinstance(history, list) or len(history) > 10 or any(not isinstance(item, dict) or item.get("role") not in {"user", "assistant"} or not isinstance(item.get("content"), str) or ("route" in item and item.get("route") not in {"knowledge", "emotional_support", "mixed", "out_of_scope", "hard_refusal", "medical_urgent", "mental_health_crisis"}) for item in history):
                 self.send_json({"error": "history must contain at most 10 valid messages"}, 400)
                 return
-            safe_history = [{"role": item["role"], "content": item["content"][:1000]} for item in history[-6:]]
+            safe_history = [{"role": item["role"], "content": item["content"][:1000], **({"route": item["route"]} if item.get("route") else {})} for item in history[-6:]]
             self.send_json(answer(query.strip(), docs, safe_history))
             return
         if path == "/api/config":

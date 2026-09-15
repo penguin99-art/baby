@@ -24,6 +24,11 @@ class RoutingTests(unittest.TestCase):
         self.assertEqual(result["route"], "emotional_support")
         self.assertIn("并不能定义你是不是一个好妈妈", result["answer"])
 
+    def test_local_emotion_signal_survives_model_false_negative(self):
+        with patch.object(app, "classify_intent", return_value={"emotion_present": False, "knowledge_present": False}), patch.object(app, "call_emotional_llm", return_value=None):
+            result = app.answer("可还要照看宝宝，想休息却走不开", [])
+        self.assertEqual(result["route"], "emotional_support")
+
     def test_medical_context_cannot_be_swallowed_by_emotion_route(self):
         result = self.run_query("宝宝发烧了，我很焦虑", "emotional_support")
         self.assertEqual(result["route"], "mixed")
@@ -60,6 +65,22 @@ class RoutingTests(unittest.TestCase):
             result = app.answer("还是很累", [], history)
         self.assertEqual(result["route"], "emotional_support")
         emotional_llm.assert_called_once_with("还是很累", history)
+
+    def test_short_reply_continues_emotional_context(self):
+        history = [
+            {"role": "user", "content": "今天真的好累"},
+            {"role": "assistant", "content": "今天已经够辛苦了。", "route": "emotional_support"},
+        ]
+        with patch.object(app, "classify_intent", return_value={"emotion_present": False, "knowledge_present": False}), patch.object(app, "call_emotional_llm", return_value=None):
+            result = app.answer("好的", [], history)
+        self.assertEqual(result["route"], "emotional_support")
+        self.assertEqual(result["answer"], "嗯，那就先让自己缓一会儿，不急着继续说。我在这里。")
+
+    def test_short_reply_without_emotional_context_is_not_forced(self):
+        history = [{"role": "assistant", "content": "辅食通常从六个月左右开始。", "route": "knowledge"}]
+        with patch.object(app, "classify_intent", return_value={"emotion_present": False, "knowledge_present": False}), patch.object(app, "embedding", return_value=None):
+            result = app.answer("好的", [], history)
+        self.assertEqual(result["route"], "out_of_scope")
 
 
 if __name__ == "__main__":
