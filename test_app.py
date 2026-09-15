@@ -13,10 +13,16 @@ class RoutingTests(unittest.TestCase):
     def test_vague_emotion_uses_support(self):
         result = self.run_query("有些困扰")
         self.assertEqual(result["route"], "emotional_support")
+        self.assertNotIn("你更想", result["answer"])
 
     def test_caregiver_tired_is_not_medical(self):
         result = self.run_query("照顾宝宝让我有点累")
         self.assertEqual(result["route"], "emotional_support")
+
+    def test_maternal_self_blame_uses_support(self):
+        result = self.run_query("我总觉得自己不是好妈妈")
+        self.assertEqual(result["route"], "emotional_support")
+        self.assertIn("并不能定义你是不是一个好妈妈", result["answer"])
 
     def test_medical_context_cannot_be_swallowed_by_emotion_route(self):
         result = self.run_query("宝宝发烧了，我很焦虑", "emotional_support")
@@ -47,6 +53,13 @@ class RoutingTests(unittest.TestCase):
         self.assertEqual(result["route"], "mixed")
         self.assertTrue(result["answer"].startswith("我能理解这件事让你有些担心"))
         self.assertIn("下面补充知识库中有依据的部分", result["answer"])
+
+    def test_emotional_llm_receives_recent_history(self):
+        history = [{"role": "user", "content": "最近一直睡不好"}, {"role": "assistant", "content": "先让自己缓一缓。"}]
+        with patch.object(app, "classify_intent", return_value={"emotion_present": True, "knowledge_present": False}), patch.object(app, "call_emotional_llm", return_value="今晚确实很难熬。") as emotional_llm:
+            result = app.answer("还是很累", [], history)
+        self.assertEqual(result["route"], "emotional_support")
+        emotional_llm.assert_called_once_with("还是很累", history)
 
 
 if __name__ == "__main__":
