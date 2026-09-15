@@ -144,13 +144,40 @@ def high_risk_message(query: str) -> str | None:
 
 
 def is_emotional_support(query: str) -> bool:
-    signals = ["有点累", "好累", "很累", "太累了", "累坏了", "疲惫", "压力", "焦虑", "委屈", "难过", "孤单", "孤独", "没人理解", "想哭", "崩溃", "内疚", "自责", "睡不着", "陪我聊", "听我说", "心情", "情绪"]
+    signals = ["有点累", "好累", "很累", "太累了", "累坏了", "疲惫", "压力", "焦虑", "委屈", "难过", "孤单", "孤独", "没人理解", "想哭", "崩溃", "内疚", "自责", "睡不着", "陪我聊", "听我说", "心情", "情绪", "困扰", "烦心"]
     return any(signal in query for signal in signals)
 
 
 def has_medical_context(query: str) -> bool:
     signals = ["宝宝", "婴儿", "孩子", "新生儿", "月龄", "发烧", "发热", "咳嗽", "呕吐", "腹泻", "不会坐", "发育", "症状", "疼", "出血", "奶量"]
     return any(signal in query for signal in signals)
+
+
+def classify_route(query: str) -> str | None:
+    """Use the configured model as a semantic router, never as a safety gate."""
+    base_url = setting("LLM_BASE_URL").rstrip("/")
+    api_key = setting("LLM_API_KEY")
+    model = setting("LLM_MODEL")
+    if not (base_url and api_key and model):
+        return None
+    prompt = (
+        "将用户消息分类为一个 route，只输出 JSON，不要解释。允许值：knowledge、emotional_support、mixed、out_of_scope。"
+        "knowledge=询问母婴知识或照护事实；emotional_support=主要是在表达情绪、寻求倾听陪伴；"
+        "mixed=同时包含情绪表达和母婴事实问题；out_of_scope=购物、品牌推荐、成人话题或其他无关内容。"
+        "如果包含急症、自伤、他伤、处方、剂量、诊断或疫苗禁忌，不要分类为 emotional_support，返回 mixed。"
+        "格式必须是 {\"route\":\"...\"}。\n用户消息：" + query
+    )
+    body = json.dumps({"model": model, "temperature": 0, "messages": [{"role": "user", "content": prompt}]}).encode()
+    request = Request(f"{base_url}/v1/chat/completions", data=body, headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"})
+    try:
+        with urlopen(request, timeout=12) as response:
+            payload = json.loads(response.read().decode())
+        raw = payload["choices"][0]["message"]["content"].strip()
+        parsed = json.loads(raw[raw.find("{") : raw.rfind("}") + 1])
+        route = parsed.get("route")
+        return route if route in {"knowledge", "emotional_support", "mixed", "out_of_scope"} else None
+    except (KeyError, TypeError, ValueError, IndexError, json.JSONDecodeError, OSError):
+        return None
 
 
 def emotional_fallback(query: str) -> str:
@@ -214,7 +241,11 @@ def answer(query: str, docs: list[dict]) -> dict:
     high_risk = high_risk_message(query)
     if high_risk:
         return {"status": "refused", "route": "hard_refusal", "answer": high_risk, "citations": [], "reason": "命中高风险主题规则"}
-    if is_emotional_support(query) and not has_medical_context(query):
+    semantic_route = classify_route(query)
+    medical_context = has_medical_context(query)
+    if semantic_route == "emotional_support" and medical_context:
+        semantic_route = "mixed"
+    if semantic_route == "emotional_support" or (semantic_route is None and is_emotional_support(query) and not medical_context):
         generated = call_emotional_llm(query)
         unsafe = re.compile(r"(你有抑郁|你是焦虑症|我能治好|保证会好|只要积极|只能依赖我|处方|剂量|停药|换药|诊断为)", re.I)
         if not generated or unsafe.search(generated):
@@ -222,12 +253,16 @@ def answer(query: str, docs: list[dict]) -> dict:
         return {"status": "supported", "route": "emotional_support", "answer": generated, "citations": [], "reason": "情绪支持通道"}
     evidence = [item for item in search(query, docs) if item["score"] >= THRESHOLD]
     if not evidence or evidence[0]["score"] < THRESHOLD:
+        if semantic_route == "mixed":
+            return {"status": "supported", "route": "mixed", "answer": emotional_fallback(query) + "\n\n关于其中的母婴知识问题，当前知识库没有足够资料支持回答，建议咨询儿科或儿童保健专业人员。", "citations": [], "reason": "已识别情绪表达，但知识证据不足"}
         return {"status": "refused", "route": "out_of_scope", "answer": "这个问题不在当前母婴知识库的覆盖范围内，且不属于情绪支持。为避免误导，我暂不回答。你可以询问已导入文档中的内容，或和我聊聊最近的感受。", "citations": evidence[:2], "reason": f"最高证据分数 {evidence[0]['score'] if evidence else 0:.2f} < 门槛 {THRESHOLD:.2f}"}
     generated = call_llm(query, evidence)
     unsafe = re.compile(r"(mg\s*/?\s*kg|毫克|剂量|每公斤|诊断为|确诊|处方|停药|换药|服用.{0,12}(布洛芬|对乙酰氨基酚|抗生素))", re.I)
     if generated and unsafe.search(generated):
         generated = None
     text = generated or "\n\n".join(f"{item['text']} [{i + 1}]" for i, item in enumerate(evidence[:3]))
+    if semantic_route == "mixed":
+        text = "我能理解这件事让你有些担心。下面只补充知识库中有依据的部分：\n\n" + text
     return {"status": "answered", "route": "knowledge", "answer": text, "citations": evidence[:3], "reason": "已通过闭域证据门槛"}
 
 
