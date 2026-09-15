@@ -156,19 +156,18 @@ def has_medical_context(query: str) -> bool:
     )
 
 
-def classify_route(query: str) -> str | None:
-    """Use the configured model as a semantic router, never as a safety gate."""
+def classify_intent(query: str) -> dict | None:
+    """Use the configured model for intent hints, never as a safety gate."""
     base_url = setting("LLM_BASE_URL").rstrip("/")
     api_key = setting("LLM_API_KEY")
     model = setting("LLM_MODEL")
     if not (base_url and api_key and model):
         return None
     prompt = (
-        "将用户消息分类为一个 route，只输出 JSON，不要解释。允许值：knowledge、emotional_support、mixed、out_of_scope。"
-        "knowledge=询问母婴知识或照护事实；emotional_support=主要是在表达情绪、寻求倾听陪伴；"
-        "mixed=同时包含情绪表达和母婴事实问题；out_of_scope=购物、品牌推荐、成人话题或其他无关内容。"
-        "如果包含急症、自伤、他伤、处方、剂量、诊断或疫苗禁忌，不要分类为 emotional_support，返回 mixed。"
-        "格式必须是 {\"route\":\"...\"}。\n用户消息：" + query
+        "分析用户消息，只输出 JSON，不要解释。字段 emotion_present 和 knowledge_present 必须是 true/false。"
+        "emotion_present=true 表示用户在表达感受或寻求倾听；knowledge_present=true 表示在询问母婴知识或照护事实。"
+        "购物、品牌推荐、成人话题或其他无关内容的 knowledge_present=false。包含宝宝、婴儿、孩子或月龄，并涉及发烧、发热、咳嗽、呕吐、腹泻、疼痛、出血、拒奶、黄疸、湿疹、呼吸、发育、疫苗或辅食时，knowledge_present必须为true。请不要做安全判断。"
+        "格式必须是 {\"emotion_present\":false,\"knowledge_present\":true}。\n用户消息：" + query
     )
     body = json.dumps({"model": model, "temperature": 0, "messages": [{"role": "user", "content": prompt}]}).encode()
     request = Request(f"{base_url}/v1/chat/completions", data=body, headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"})
@@ -177,8 +176,9 @@ def classify_route(query: str) -> str | None:
             payload = json.loads(response.read().decode())
         raw = payload["choices"][0]["message"]["content"].strip()
         parsed = json.loads(raw[raw.find("{") : raw.rfind("}") + 1])
-        route = parsed.get("route")
-        return route if route in {"knowledge", "emotional_support", "mixed", "out_of_scope"} else None
+        if not isinstance(parsed.get("emotion_present"), bool) or not isinstance(parsed.get("knowledge_present"), bool):
+            return None
+        return parsed
     except (KeyError, TypeError, ValueError, IndexError, json.JSONDecodeError, OSError):
         return None
 
@@ -187,6 +187,14 @@ def emotional_fallback(query: str) -> str:
     if any(word in query for word in ["有点累", "好累", "很累", "太累了", "累坏了", "疲惫", "睡不着"]):
         return "听起来你这段时间真的很累。照顾孩子本来就需要持续投入，有疲惫感并不代表你做得不好，也不代表你不爱孩子。现在不必一次解决所有事情，可以先做一个很小的选择：先喝点水、请可信任的人接手一会儿，或者把最压着你的那件事告诉我。你更想让我先听你说，还是一起梳理下一步？"
     return "听起来你现在承受了不少情绪和压力。你的感受值得被认真听见，不需要急着证明自己足够坚强。我们可以慢一点：你更想让我先陪你倾诉，还是一起把眼前最困扰你的事情拆开？如果你或孩子当下不安全，请立即联系身边可信任的人和当地急救资源。"
+
+
+def empathy_lead(query: str) -> str:
+    if any(word in query for word in ["有点累", "好累", "很累", "太累了", "累坏了", "疲惫"]):
+        return "听起来你这段时间真的很累，有这种感受并不代表你做得不好。"
+    if any(word in query for word in ["焦虑", "担心", "害怕", "不安"]):
+        return "我能理解这件事让你有些担心，照护孩子时出现这样的不安很常见。"
+    return "我能理解这件事让你有些困扰，你的感受值得被认真听见。"
 
 
 def call_llm(query: str, evidence: list[dict]) -> str | None:
@@ -244,11 +252,13 @@ def answer(query: str, docs: list[dict]) -> dict:
     high_risk = high_risk_message(query)
     if high_risk:
         return {"status": "refused", "route": "hard_refusal", "answer": high_risk, "citations": [], "reason": "命中高风险主题规则"}
-    semantic_route = classify_route(query)
+    intent = classify_intent(query)
     medical_context = has_medical_context(query)
-    if semantic_route == "emotional_support" and medical_context:
-        semantic_route = "mixed"
-    if semantic_route == "emotional_support" or (semantic_route is None and is_emotional_support(query) and not medical_context):
+    emotion_present = intent["emotion_present"] if intent else is_emotional_support(query)
+    knowledge_present = intent["knowledge_present"] if intent else medical_context
+    if medical_context:
+        knowledge_present = True
+    if emotion_present and not knowledge_present:
         generated = call_emotional_llm(query)
         unsafe = re.compile(r"(你有抑郁|你是焦虑症|我能治好|保证会好|只要积极|只能依赖我|处方|剂量|停药|换药|诊断为)", re.I)
         if not generated or unsafe.search(generated):
@@ -256,17 +266,17 @@ def answer(query: str, docs: list[dict]) -> dict:
         return {"status": "supported", "route": "emotional_support", "answer": generated, "citations": [], "reason": "情绪支持通道"}
     evidence = [item for item in search(query, docs) if item["score"] >= THRESHOLD]
     if not evidence or evidence[0]["score"] < THRESHOLD:
-        if semantic_route == "mixed":
-            return {"status": "supported", "route": "mixed", "answer": emotional_fallback(query) + "\n\n关于其中的母婴知识问题，当前知识库没有足够资料支持回答，建议咨询儿科或儿童保健专业人员。", "citations": [], "reason": "已识别情绪表达，但知识证据不足"}
+        if emotion_present:
+            return {"status": "supported", "route": "mixed", "answer": empathy_lead(query) + "\n\n关于其中的母婴知识问题，当前知识库没有足够资料支持回答，建议咨询儿科或儿童保健专业人员。", "citations": [], "reason": "已识别情绪表达，但知识证据不足"}
         return {"status": "refused", "route": "out_of_scope", "answer": "这个问题不在当前母婴知识库的覆盖范围内，且不属于情绪支持。为避免误导，我暂不回答。你可以询问已导入文档中的内容，或和我聊聊最近的感受。", "citations": evidence[:2], "reason": f"最高证据分数 {evidence[0]['score'] if evidence else 0:.2f} < 门槛 {THRESHOLD:.2f}"}
     generated = call_llm(query, evidence)
     unsafe = re.compile(r"(mg\s*/?\s*kg|毫克|剂量|每公斤|诊断为|确诊|处方|停药|换药|服用.{0,12}(布洛芬|对乙酰氨基酚|抗生素))", re.I)
     if generated and unsafe.search(generated):
         generated = None
     text = generated or "\n\n".join(f"{item['text']} [{i + 1}]" for i, item in enumerate(evidence[:3]))
-    if semantic_route == "mixed":
-        text = "我能理解这件事让你有些担心。下面只补充知识库中有依据的部分：\n\n" + text
-    return {"status": "answered", "route": "knowledge", "answer": text, "citations": evidence[:3], "reason": "已通过闭域证据门槛"}
+    if emotion_present:
+        text = empathy_lead(query) + "\n\n下面补充知识库中有依据的部分：\n\n" + text
+    return {"status": "answered", "route": "mixed" if emotion_present else "knowledge", "answer": text, "citations": evidence[:3], "reason": "情绪优先承接，已通过闭域证据门槛" if emotion_present else "已通过闭域证据门槛"}
 
 
 def public_config() -> dict:

@@ -6,7 +6,8 @@ import app
 
 class RoutingTests(unittest.TestCase):
     def run_query(self, query, route=None):
-        with patch.object(app, "classify_route", return_value=route), patch.object(app, "call_emotional_llm", return_value=None), patch.object(app, "call_llm", return_value=None), patch.object(app, "embedding", return_value=None):
+        intent = None if route is None else {"emotion_present": route == "emotional_support", "knowledge_present": route in {"knowledge", "mixed"}}
+        with patch.object(app, "classify_intent", return_value=intent), patch.object(app, "call_emotional_llm", return_value=None), patch.object(app, "call_llm", return_value=None), patch.object(app, "embedding", return_value=None):
             return app.answer(query, [])
 
     def test_vague_emotion_uses_support(self):
@@ -35,9 +36,17 @@ class RoutingTests(unittest.TestCase):
 
     def test_knowledge_evidence_wins_over_out_of_scope_label(self):
         docs = [{"id": "d1", "name": "feeding.md", "chunks": [{"id": "c1", "text": "婴儿满6月龄左右开始添加辅食。"}]}]
-        with patch.object(app, "classify_route", return_value="out_of_scope"):
+        with patch.object(app, "classify_intent", return_value={"emotion_present": False, "knowledge_present": False}), patch.object(app, "embedding", return_value=None), patch.object(app, "call_llm", return_value=None):
             result = app.answer("什么时候开始添加辅食？", docs)
         self.assertEqual(result["route"], "knowledge")
+
+    def test_mixed_answer_leads_with_short_empathy(self):
+        docs = [{"id": "d1", "name": "feeding.md", "chunks": [{"id": "c1", "text": "婴儿满6月龄左右开始添加辅食。"}]}]
+        with patch.object(app, "classify_intent", return_value={"emotion_present": True, "knowledge_present": True}), patch.object(app, "embedding", return_value=None), patch.object(app, "call_llm", return_value=None):
+            result = app.answer("我很焦虑，宝宝什么时候开始添加辅食？", docs)
+        self.assertEqual(result["route"], "mixed")
+        self.assertTrue(result["answer"].startswith("我能理解这件事让你有些担心"))
+        self.assertIn("下面补充知识库中有依据的部分", result["answer"])
 
 
 if __name__ == "__main__":
