@@ -129,6 +129,36 @@ def emergency_message(query: str) -> str | None:
     return None
 
 
+def crisis_message(query: str) -> str | None:
+    signals = ["不想活", "想死", "自杀", "伤害自己", "伤害孩子", "杀了孩子", "孩子也别想活", "控制不住自己", "没有人身安全", "家暴"]
+    if any(signal in query for signal in signals):
+        return "我很重视你刚才说的内容。请现在先不要独处，把自己和孩子交给身边可信任的成年人照看，并立即联系当地急救电话、前往最近的急诊或联系当地心理危机服务。如果已经有人受伤或处于危险中，请马上拨打 120 或当地紧急求助电话。"
+    return None
+
+
+def high_risk_message(query: str) -> str | None:
+    signals = ["剂量", "吃什么药", "用什么药", "想吃药", "安眠药", "服什么药", "停药", "换药", "处方", "诊断", "是不是肺炎", "是不是抑郁", "疫苗禁忌", "补种几针"]
+    if any(signal in query for signal in signals):
+        return "这个问题涉及个体化医疗或心理判断，我不能在线提供诊断、处方、用药剂量、停药建议或疫苗禁忌判断。请咨询儿科医生、妇产科医生、心理专业人员或接种门诊。"
+    return None
+
+
+def is_emotional_support(query: str) -> bool:
+    signals = ["有点累", "好累", "很累", "太累了", "累坏了", "疲惫", "压力", "焦虑", "委屈", "难过", "孤单", "孤独", "没人理解", "想哭", "崩溃", "内疚", "自责", "睡不着", "陪我聊", "听我说", "心情", "情绪"]
+    return any(signal in query for signal in signals)
+
+
+def has_medical_context(query: str) -> bool:
+    signals = ["宝宝", "婴儿", "孩子", "新生儿", "月龄", "发烧", "发热", "咳嗽", "呕吐", "腹泻", "不会坐", "发育", "症状", "疼", "出血", "奶量"]
+    return any(signal in query for signal in signals)
+
+
+def emotional_fallback(query: str) -> str:
+    if any(word in query for word in ["有点累", "好累", "很累", "太累了", "累坏了", "疲惫", "睡不着"]):
+        return "听起来你这段时间真的很累。照顾孩子本来就需要持续投入，有疲惫感并不代表你做得不好，也不代表你不爱孩子。现在不必一次解决所有事情，可以先做一个很小的选择：先喝点水、请可信任的人接手一会儿，或者把最压着你的那件事告诉我。你更想让我先听你说，还是一起梳理下一步？"
+    return "听起来你现在承受了不少情绪和压力。你的感受值得被认真听见，不需要急着证明自己足够坚强。我们可以慢一点：你更想让我先陪你倾诉，还是一起把眼前最困扰你的事情拆开？如果你或孩子当下不安全，请立即联系身边可信任的人和当地急救资源。"
+
+
 def call_llm(query: str, evidence: list[dict]) -> str | None:
     base_url = setting("LLM_BASE_URL").rstrip("/")
     api_key = setting("LLM_API_KEY")
@@ -152,19 +182,53 @@ def call_llm(query: str, evidence: list[dict]) -> str | None:
         return None
 
 
+def call_emotional_llm(query: str) -> str | None:
+    base_url = setting("LLM_BASE_URL").rstrip("/")
+    api_key = setting("LLM_API_KEY")
+    model = setting("LLM_MODEL")
+    if not (base_url and api_key and model):
+        return None
+    prompt = (
+        "你是面向母亲和照护者的温和情绪支持伙伴。请用简体中文回应，先共情和复述感受，再给一个很小的可选下一步，最后询问用户想倾诉还是梳理。"
+        "不要诊断心理疾病，不承诺治愈，不提供药物或医疗建议，不强迫积极，不责备，不暗示用户只能依赖你。"
+        "如果用户提到自伤、他伤、儿童伤害、家暴或当下不安全，只回复建议立即联系身边可信任的人、当地急救/急诊和危机服务的安全提示。"
+        f"\n用户表达：{query}"
+    )
+    body = json.dumps({"model": model, "temperature": 0.4, "messages": [{"role": "user", "content": prompt}]}).encode()
+    request = Request(f"{base_url}/v1/chat/completions", data=body, headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"})
+    try:
+        with urlopen(request, timeout=25) as response:
+            payload = json.loads(response.read().decode())
+        return payload["choices"][0]["message"]["content"].strip()
+    except Exception:
+        return None
+
+
 def answer(query: str, docs: list[dict]) -> dict:
     emergency = emergency_message(query)
     if emergency:
-        return {"status": "emergency", "answer": emergency, "citations": [], "reason": "命中安全规则"}
+        return {"status": "emergency", "route": "medical_urgent", "answer": emergency, "citations": [], "reason": "命中医疗急症规则"}
+    crisis = crisis_message(query)
+    if crisis:
+        return {"status": "crisis", "route": "mental_health_crisis", "answer": crisis, "citations": [], "reason": "命中心理危机规则"}
+    high_risk = high_risk_message(query)
+    if high_risk:
+        return {"status": "refused", "route": "hard_refusal", "answer": high_risk, "citations": [], "reason": "命中高风险主题规则"}
+    if is_emotional_support(query) and not has_medical_context(query):
+        generated = call_emotional_llm(query)
+        unsafe = re.compile(r"(你有抑郁|你是焦虑症|我能治好|保证会好|只要积极|只能依赖我|处方|剂量|停药|换药|诊断为)", re.I)
+        if not generated or unsafe.search(generated):
+            generated = emotional_fallback(query)
+        return {"status": "supported", "route": "emotional_support", "answer": generated, "citations": [], "reason": "情绪支持通道"}
     evidence = [item for item in search(query, docs) if item["score"] >= THRESHOLD]
     if not evidence or evidence[0]["score"] < THRESHOLD:
-        return {"status": "refused", "answer": "这个问题不在当前母婴知识库的覆盖范围内，或知识库中没有足够证据。为避免误导，我暂不回答。请尝试询问已导入文档中的内容。", "citations": evidence[:2], "reason": f"最高证据分数 {evidence[0]['score'] if evidence else 0:.2f} < 门槛 {THRESHOLD:.2f}"}
+        return {"status": "refused", "route": "out_of_scope", "answer": "这个问题不在当前母婴知识库的覆盖范围内，且不属于情绪支持。为避免误导，我暂不回答。你可以询问已导入文档中的内容，或和我聊聊最近的感受。", "citations": evidence[:2], "reason": f"最高证据分数 {evidence[0]['score'] if evidence else 0:.2f} < 门槛 {THRESHOLD:.2f}"}
     generated = call_llm(query, evidence)
     unsafe = re.compile(r"(mg\s*/?\s*kg|毫克|剂量|每公斤|诊断为|确诊|处方|停药|换药|服用.{0,12}(布洛芬|对乙酰氨基酚|抗生素))", re.I)
     if generated and unsafe.search(generated):
         generated = None
     text = generated or "\n\n".join(f"{item['text']} [{i + 1}]" for i, item in enumerate(evidence[:3]))
-    return {"status": "answered", "answer": text, "citations": evidence[:3], "reason": "已通过闭域证据门槛"}
+    return {"status": "answered", "route": "knowledge", "answer": text, "citations": evidence[:3], "reason": "已通过闭域证据门槛"}
 
 
 def public_config() -> dict:
