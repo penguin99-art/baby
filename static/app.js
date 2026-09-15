@@ -1,0 +1,17 @@
+const $ = (s) => document.querySelector(s);
+const messages = $('#messages');
+const query = $('#query');
+
+function toast(text) { const el = $('#toast'); el.textContent = text; el.classList.add('show'); setTimeout(() => el.classList.remove('show'), 2200); }
+function addMessage(text, type, meta='') { const el = document.createElement('div'); el.className = `message ${type}`; el.textContent = text; if (meta) { const m = document.createElement('span'); m.className = 'meta'; m.textContent = meta; el.appendChild(m); } messages.appendChild(el); messages.scrollTop = messages.scrollHeight; return el; }
+function renderDocs(docs) { $('#doc-count').textContent = docs.length; $('#chunk-count').textContent = docs.reduce((n, d) => n + d.chunks, 0); $('#doc-list').innerHTML = docs.length ? docs.map(d => `<div class="doc"><div class="doc-name">${escapeHtml(d.name)}</div><div class="doc-meta">已入库 · ${d.chunks} 个分块</div></div>`).join('') : '<div class="empty-evidence">还没有文档。导入后即可开始问答。</div>'; }
+function renderCitations(items) { $('#citations').innerHTML = items.length ? items.map((c, i) => `<article class="citation"><span class="citation-score">${c.score.toFixed(2)}</span><div class="citation-title">[${i+1}] ${escapeHtml(c.name)}</div><small>分块 ${escapeHtml(c.chunk_id)}</small><blockquote>${escapeHtml(c.text)}</blockquote></article>`).join('') : '<div class="empty-evidence">本次没有使用知识库证据。</div>'; }
+function escapeHtml(value) { return String(value).replace(/[&<>'"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c])); }
+async function loadDocs() { const res = await fetch('/api/docs'); renderDocs((await res.json()).docs); }
+
+$('#ask-form').addEventListener('submit', async (event) => { event.preventDefault(); const text = query.value.trim(); if (!text) return; addMessage(text, 'user'); query.value = ''; const pending = addMessage('正在检查问题范围和知识库证据…', 'assistant'); try { const res = await fetch('/api/ask', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({query:text}) }); const data = await res.json(); pending.remove(); const meta = data.status === 'answered' ? `✓ ${data.reason} · ${data.citations.length} 个来源` : `盾牌已拦截 · ${data.reason}`; addMessage(data.answer, data.status === 'answered' ? 'assistant' : 'assistant refused', meta); renderCitations(data.citations || []); } catch { pending.remove(); addMessage('服务暂时不可用，请检查本地服务。', 'assistant refused'); } });
+$('#file-input').addEventListener('change', async (event) => upload(event.target.files));
+const dropzone = $('#dropzone'); ['dragenter','dragover'].forEach(e => dropzone.addEventListener(e, ev => { ev.preventDefault(); dropzone.classList.add('drag'); })); ['dragleave','drop'].forEach(e => dropzone.addEventListener(e, ev => { ev.preventDefault(); dropzone.classList.remove('drag'); })); dropzone.addEventListener('drop', ev => upload(ev.dataTransfer.files));
+async function upload(files) { if (!files.length) return; const form = new FormData(); [...files].forEach(file => form.append('files', file)); toast('正在导入知识库…'); const res = await fetch('/api/upload', {method:'POST', body:form}); const data = await res.json(); toast(data.added?.length ? `已导入 ${data.added.length} 篇文档` : '没有可导入的文件'); await loadDocs(); }
+$('#reset-btn').addEventListener('click', async () => { if (!confirm('确定清空全部知识库？')) return; await fetch('/api/reset', {method:'POST'}); await loadDocs(); toast('知识库已清空'); });
+loadDocs();
