@@ -2,17 +2,87 @@
 <html lang="zh-CN">
 <head>
   <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>母婴知识助手</title><link rel="stylesheet" href="/styles.css">
+  <title>宝妈助手 · 情绪陪伴</title><link rel="stylesheet" href="/styles.css">
 </head>
 <body>
-  <header class="topbar"><div class="brand"><span class="brand-mark">知</span><div><strong>母婴知识助手</strong><small>闭域问答演示</small></div></div><div class="top-actions"><div class="top-status"><span class="dot"></span>仅基于知识库回答</div><button class="settings-button" id="settings-open">设置</button></div></header>
+  <header class="topbar">
+    <div class="brand"><span class="brand-mark">♡</span><div><strong>宝妈助手</strong><small>情绪陪伴 · 知识问答</small></div></div>
+    <div class="top-actions">
+      <div class="top-status" id="speech-status" title="语音由浏览器提供，后端只接收识别后的文字"><span class="dot"></span><span id="speech-status-text">语音功能检查中…</span></div>
+      <button class="settings-button" id="settings-open">⚙ 设置</button>
+    </div>
+  </header>
   <main class="layout">
     <aside class="sidebar">
-      <section class="panel import-panel"><div class="eyebrow">知识库</div><h1>把可靠内容<br>带进来</h1><p>导入后，助手只会依据这些文档作答。</p><label class="dropzone" id="dropzone"><input id="file-input" type="file" multiple accept=".md"><span class="upload-icon">↑</span><b>点击或拖入文件</b><small>当前支持 Markdown</small></label></section>
-      <section class="docs-section"><div class="section-head"><span>已导入文档</span><button class="text-button" id="reset-btn">清空</button></div><div class="stats"><strong id="doc-count">0</strong><span>篇文档</span><i></i><strong id="chunk-count">0</strong><span>个分块</span></div><div id="doc-list" class="doc-list"></div></section>
+      <section class="panel import-panel">
+        <div class="eyebrow">📚 知识库</div>
+        <h1>把可靠内容<br>带进来</h1>
+        <p>导入后，助手只会依据这些文档作答。</p>
+        <label class="dropzone" id="dropzone">
+          <input id="file-input" type="file" multiple accept=".md">
+          <span class="upload-icon">↑</span>
+          <b>点击或拖入文件</b>
+          <small>当前支持 Markdown</small>
+        </label>
+      </section>
+      <section class="docs-section">
+        <div class="section-head"><span>已导入文档</span><button class="text-button" id="reset-btn">🗑 清空</button></div>
+        <div class="stats"><strong id="doc-count">0</strong><span>篇文档</span><i></i><strong id="chunk-count">0</strong><span>个分块</span></div>
+        <div id="doc-list" class="doc-list"></div>
+      </section>
     </aside>
-    <section class="chat-shell"><div class="chat-head"><div><div class="eyebrow">问答空间</div><h2>从知识库里找到答案</h2></div><span class="mode-badge">CLOSED DOMAIN</span></div><div id="messages" class="messages"><div class="welcome"><div class="welcome-icon">✦</div><h3>你好，我只回答<br>知识库里有依据的问题</h3><p>导入文档后，试着从下面的问题开始。</p><div class="suggestions"><button>宝宝辅食什么时候开始？</button><button>新生儿需要注意哪些护理？</button><button>推荐一款奶粉？</button></div></div></div><form id="ask-form" class="composer"><textarea id="query" rows="1" placeholder="询问已导入知识库中的内容..." required></textarea><button class="send" aria-label="发送">↗</button><small>答案会附上对应的知识库来源</small></form></section>
-    <aside class="evidence-panel"><div class="evidence-head"><div class="eyebrow">证据链</div><h2>引用来源</h2><p>回答中的每个结论都应能回到这里。</p></div><div id="citations" class="citations"><div class="empty-evidence">回答后，这里会显示<br>实际使用的文档片段。</div></div></aside>
+
+    <section class="chat-shell">
+      <div class="chat-head">
+        <div><div class="eyebrow">陪伴空间</div><h2>先听你说，再认真找答案</h2></div>
+        <button type="button" class="speech-toggle" id="speech-toggle" aria-pressed="true" title="关闭回答朗读">朗读：开</button>
+      </div>
+      <div id="messages" class="messages">
+        <div class="welcome">
+          <div class="welcome-icon">🌷</div>
+          <h3>这里是留给你的<br>一小块空间</h3>
+          <p>可以说说今天的感受，也可以问母婴知识。<br>专业内容只依据已导入的知识库回答。</p>
+          <div class="suggestions">
+            <button>宝宝辅食什么时候开始？</button>
+            <button>新生儿需要注意哪些护理？</button>
+            <button>今天有点累，想聊聊</button>
+          </div>
+        </div>
+      </div>
+      <form id="ask-form" class="composer">
+        <div class="composer-row">
+          <textarea id="query" rows="1" placeholder="输入问题，或按麦克风语音提问…" required></textarea>
+          <button type="button" class="voice-btn" id="voice-btn" aria-label="语音输入" title="点击开始语音输入">
+            <svg class="mic-icon" viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="1" width="6" height="12" rx="3"/><path d="M19 10v1a7 7 0 0 1-14 0v-1"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg>
+          </button>
+          <button class="send" aria-label="发送">
+            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg>
+          </button>
+        </div>
+        <small id="composer-hint">说完自动发送 · 回答可朗读 · 专业内容附知识库来源</small>
+      </form>
+    </section>
+
+    <aside class="evidence-panel">
+      <div class="evidence-head"><div class="eyebrow">📎 证据链</div><h2>引用来源</h2><p>回答中的每个结论都应能回到这里。</p></div>
+      <div id="citations" class="citations">
+        <div class="empty-evidence">回答后，这里会显示<br>实际使用的文档片段。</div>
+      </div>
+    </aside>
   </main>
-  <div class="settings-overlay" id="settings-overlay" aria-hidden="true"><section class="settings-page"><div class="settings-header"><div><div class="eyebrow">运行配置</div><h2>连接你的模型服务</h2><p>配置只保存在当前服务进程内存中，重启后请使用环境变量重新注入。</p></div><button class="close-button" id="settings-close" aria-label="关闭">×</button></div><form id="settings-form"><div class="settings-grid"><fieldset><legend>LLM 对话模型</legend><label>Base URL<input id="llm-base" placeholder="https://api.example.com"></label><label>API Key<input id="llm-key" type="password" placeholder="留空则保持当前配置"></label><label>模型名称<input id="llm-model" placeholder="chat-model"></label></fieldset><fieldset><legend>Embedding 向量模型</legend><label>Base URL<input id="embedding-base" placeholder="默认复用 LLM Base URL"></label><label>API Key<input id="embedding-key" type="password" placeholder="默认复用 LLM API Key"></label><label>模型名称<input id="embedding-model" placeholder="embedding-model"></label></fieldset></div><div class="settings-footer"><span id="config-status">尚未测试连接</span><div><button type="button" class="secondary-button" id="config-test">测试连接</button><button type="submit" class="primary-button">保存配置</button></div></div></form></section></div><div id="toast" class="toast"></div><script src="/app.js"></script>
+
+  <div class="settings-overlay" id="settings-overlay" aria-hidden="true">
+    <section class="settings-page">
+      <div class="settings-header"><div><div class="eyebrow">⚙ 运行配置</div><h2>连接你的模型服务</h2><p>配置只保存在当前服务进程内存中，重启后请使用环境变量重新注入。</p></div><button class="close-button" id="settings-close" aria-label="关闭">×</button></div>
+      <form id="settings-form">
+        <div class="settings-grid">
+          <fieldset><legend>LLM 对话模型</legend><label>Base URL<input id="llm-base" placeholder="https://api.example.com"></label><label>API Key<input id="llm-key" type="password" placeholder="留空则保持当前配置"></label><label>模型名称<input id="llm-model" placeholder="chat-model"></label></fieldset>
+          <fieldset><legend>Embedding 向量模型</legend><label>Base URL<input id="embedding-base" placeholder="默认复用 LLM Base URL"></label><label>API Key<input id="embedding-key" type="password" placeholder="默认复用 LLM API Key"></label><label>模型名称<input id="embedding-model" placeholder="embedding-model"></label></fieldset>
+        </div>
+        <div class="settings-footer"><span id="config-status">尚未测试连接</span><div><button type="button" class="secondary-button" id="config-test">测试连接</button><button type="submit" class="primary-button">保存配置</button></div></div>
+      </form>
+    </section>
+  </div>
+  <div id="toast" class="toast"></div>
+  <script src="/app.js"></script>
 </body></html>
