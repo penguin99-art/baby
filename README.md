@@ -12,6 +12,25 @@ python3 app.py
 
 页面支持浏览器原生中文语音输入和回答朗读。语音识别的可用性及语音数据处理方式取决于浏览器实现；应用后端只接收识别后的文字，不接收或保存录音文件。
 
+语音转写后需确认发送，自动朗读默认关闭；关闭自动朗读后仍可手动播放单条回复。录音取消保留已有草稿。
+
+## 会话与验证
+
+浏览器通过 HttpOnly / SameSite Cookie 访问本地 SQLite 会话。刷新页面或重启同一个服务后可恢复历史；会话在创建后 24 小时过期，下次请求时清理。页面的“删除会话”立即删除该会话历史，不删除知识库。数据文件 `data/conversations.sqlite3` 被 Git 忽略，但本地明文存储，不适合直接公开部署。
+
+启用模型 API 后，最近对话会发送给供应商。当前没有账号系统、跨设备同步或长期健康画像。请只运行一个服务进程；SQLite 的会话串行锁不是多进程锁。`localhost` 与 `127.0.0.1` 是不同 Cookie 来源，请固定使用一种地址。
+
+每条回复区分“模型生成 / 本地降级 / 固定能力”。`execution` 记录 planner 和 generator 的调用结果，包含未配置、超时、上游失败和输出阻断，不记录密钥或原始上游错误。
+
+```bash
+python3 -m unittest -v test_app test_conversation_store test_session_api
+node --check static/app.js
+```
+
+API 变更：先 `GET /api/session` 获得 Cookie 与 revision，再 `POST /api/ask` 提交 `query`、`request_id`、`revision`；不再接受客户端 `history`。所有 POST 必须带 `X-Requested-With: BabyAssistant`。重复 ID 与相同内容返回缓存，不同内容或旧 revision 返回 409。`POST /api/session/clear` 删除会话。当前仅支持实际服务端口的 localhost / 127.0.0.1，限制跨站请求；这些限制不是生产鉴权的替代。
+
+本轮实施记录与尚未完成的能力见 [M0/M1 实施记录](docs/M0-M1-实施记录.md)。目标架构见 [v4](docs/宝妈助手目标技术架构-v4.md)，现状对照与前沿迭代见 [v5](docs/现状对照与前沿迭代方案-v5.md)。
+
 页面右上角的“设置”可以临时配置 LLM 和 Embedding API，并测试连通性。网页配置只写入当前 Python 进程内存，不会保存 API Key；服务重启后请使用环境变量或重新在页面填写。生产环境建议接入 Secret Manager，并通过 HTTPS 和鉴权保护配置接口。
 
 ## API 配置

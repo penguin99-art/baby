@@ -1,48 +1,316 @@
-const $ = (s) => document.querySelector(s);
+const $ = (selector) => document.querySelector(selector);
 const messages = $('#messages');
 const query = $('#query');
-const chatHistory = [];
-const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+const welcome = messages.innerHTML;
+let revision = 0;
+let ready = false;
+let busy = false;
+let retryRequest = null;
+const Recognition = window.SpeechRecognition || window.webkitSpeechRecognition;
 let recognition = null;
-let listening = false;
-let speechEnabled = 'speechSynthesis' in window;
-let submitVoiceResult = false;
+let recording = false;
+let voiceCancelled = false;
+let voiceDraft = '';
+let speechEnabled = false;
+let activeAudioButton = null;
 
-function toast(text) { const el = $('#toast'); el.textContent = text; el.classList.add('show'); setTimeout(() => el.classList.remove('show'), 2200); }
-function renderMarkdown(text) { let html = escapeHtml(text); html = html.replace(/^### (.+)$/gm, '<h5>$1</h5>').replace(/^## (.+)$/gm, '<h4>$1</h4>').replace(/^# (.+)$/gm, '<h3>$1</h3>').replace(/^> (.+)$/gm, '<blockquote>$1</blockquote>').replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>').replace(/`([^`]+)`/g, '<code>$1</code>').replace(/^[-*] (.+)$/gm, '<li>$1</li>').replace(/(<li>.*<\/li>\n?)+/g, '<ul>$&</ul>').replace(/\n{2,}/g, '</p><p>').replace(/\n/g, '<br>'); return `<p>${html}</p>`; }
-function speak(text) { if (!speechEnabled || !('speechSynthesis' in window)) return; window.speechSynthesis.cancel(); const utterance = new SpeechSynthesisUtterance(text.replace(/[#*`\[\]]/g, '')); utterance.lang = 'zh-CN'; utterance.rate = 0.95; utterance.pitch = 1.02; window.speechSynthesis.speak(utterance); }
-function addMessage(text, type, meta='') { const el = document.createElement('div'); el.className = `message ${type}`; if (type.includes('assistant')) el.innerHTML = renderMarkdown(text); else el.textContent = text; if (meta) { const m = document.createElement('span'); m.className = 'meta'; m.textContent = meta; if (type.includes('assistant') && 'speechSynthesis' in window) { const audio = document.createElement('button'); audio.type = 'button'; audio.className = 'audio-button'; audio.textContent = '播放'; audio.title = '朗读这条回答'; audio.addEventListener('click', () => { if (window.speechSynthesis.speaking) { window.speechSynthesis.cancel(); audio.textContent = '播放'; } else { speak(text); audio.textContent = '停止'; setTimeout(() => { audio.textContent = '播放'; }, Math.max(2500, text.length * 180)); } }); m.appendChild(audio); } el.appendChild(m); } messages.appendChild(el); messages.scrollTop = messages.scrollHeight; return el; }
-function renderDocs(docs) { $('#doc-count').textContent = docs.length; $('#chunk-count').textContent = docs.reduce((n, d) => n + d.chunks, 0); $('#doc-list').innerHTML = docs.length ? docs.map(d => `<div class="doc"><div class="doc-name">${escapeHtml(d.name)}</div><div class="doc-meta">已入库 · ${d.chunks} 个分块</div></div>`).join('') : '<div class="empty-evidence">还没有文档。导入后即可开始问答。</div>'; }
-function renderCitations(items) { $('#citations').innerHTML = items.length ? items.map((c, i) => `<article class="citation"><span class="citation-score">${c.score.toFixed(2)}</span><div class="citation-title">[${i+1}] ${escapeHtml(c.name)}</div><small>分块 ${escapeHtml(c.chunk_id)}</small><blockquote>${escapeHtml(c.text)}</blockquote></article>`).join('') : '<div class="empty-evidence">本次没有使用知识库证据。</div>'; }
-function escapeHtml(value) { return String(value).replace(/[&<>'"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c])); }
-async function loadDocs() { const res = await fetch('/api/docs'); renderDocs((await res.json()).docs); }
+function toast(text) {
+  const el = $('#toast');
+  el.textContent = text;
+  el.classList.add('show');
+  setTimeout(() => el.classList.remove('show'), 3000);
+}
 
-$('#ask-form').addEventListener('submit', async (event) => { event.preventDefault(); const text = query.value.trim(); if (!text) return; window.speechSynthesis?.cancel(); addMessage(text, 'user'); query.value = ''; const pending = addMessage('正在认真读你的话…', 'assistant'); try { const res = await fetch('/api/ask', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({query:text, history:chatHistory.slice(-6)}) }); const data = await res.json(); pending.remove(); if (!res.ok) throw new Error(data.error || 'request failed'); const labels = {supported:data.route === 'companion_with_knowledge' ? '陪伴 + 专业依据' : data.route === 'assistant_identity' ? '关于我' : data.route === 'medical_boundary' ? '陪伴 + 专业边界' : '陪伴回应', emergency:'医疗急症提示', crisis:'危机支持提示'}; const meta = `${labels[data.status] || '安全处理'} · ${data.reason}${data.citations?.length ? ` · ${data.citations.length} 个来源` : ''}`; const messageType = data.status === 'supported' ? 'assistant supported' : 'assistant refused'; addMessage(data.answer, messageType, meta); if (speechEnabled) speak(data.answer); chatHistory.push({role:'user', content:text.slice(0,1000)}, {role:'assistant', content:data.answer.slice(0,1000), route:data.route}); if (chatHistory.length > 10) chatHistory.splice(0, chatHistory.length - 10); renderCitations(data.citations || []); } catch { pending.remove(); addMessage('服务暂时不可用，请检查本地服务。', 'assistant refused'); } });
-$('#file-input').addEventListener('change', async (event) => upload(event.target.files));
-const dropzone = $('#dropzone'); ['dragenter','dragover'].forEach(e => dropzone.addEventListener(e, ev => { ev.preventDefault(); dropzone.classList.add('drag'); })); ['dragleave','drop'].forEach(e => dropzone.addEventListener(e, ev => { ev.preventDefault(); dropzone.classList.remove('drag'); })); dropzone.addEventListener('drop', ev => upload(ev.dataTransfer.files));
-async function upload(files) { if (!files.length) return; const form = new FormData(); [...files].forEach(file => form.append('files', file)); toast('正在导入知识库…'); const res = await fetch('/api/upload', {method:'POST', body:form}); const data = await res.json(); toast(data.added?.length ? `已导入 ${data.added.length} 篇文档` : '没有可导入的文件'); await loadDocs(); }
-$('#reset-btn').addEventListener('click', async () => { if (!confirm('确定清空全部知识库？')) return; await fetch('/api/reset', {method:'POST'}); await loadDocs(); toast('知识库已清空'); });
-document.querySelectorAll('.suggestions button').forEach(button => button.addEventListener('click', () => { query.value = button.textContent.trim(); $('#ask-form').requestSubmit(); }));
-loadDocs();
+async function api(path, options = {}) {
+  const res = await fetch(path, {
+    ...options,
+    headers: {'X-Requested-With': 'BabyAssistant', ...options.headers},
+  });
+  let data;
+  try { data = await res.json(); }
+  catch {
+    const error = new Error('invalid_response');
+    error.status = res.status;
+    throw error;
+  }
+  if (!res.ok) {
+    const error = new Error(data.error || 'request_failed');
+    error.status = res.status;
+    throw error;
+  }
+  return data;
+}
+
+function escapeHtml(value) {
+  return String(value).replace(/[&<>'"]/g, c => ({'&':'&amp;', '<':'&lt;', '>':'&gt;', "'":'&#39;', '"':'&quot;'}[c]));
+}
+
+function renderMarkdown(text) {
+  let html = escapeHtml(text);
+  html = html.replace(/^### (.+)$/gm, '<h5>$1</h5>')
+    .replace(/^## (.+)$/gm, '<h4>$1</h4>').replace(/^# (.+)$/gm, '<h3>$1</h3>')
+    .replace(/^&gt; (.+)$/gm, '<blockquote>$1</blockquote>')
+    .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>').replace(/`([^`]+)`/g, '<code>$1</code>')
+    .replace(/^[-*] (.+)$/gm, '<li>$1</li>').replace(/(<li>.*<\/li>\n?)+/g, '<ul>$&</ul>')
+    .replace(/\n{2,}/g, '</p><p>').replace(/\n/g, '<br>');
+  return `<p>${html}</p>`;
+}
+
+function stopSpeech() {
+  window.speechSynthesis?.cancel();
+  if (activeAudioButton) activeAudioButton.textContent = '播放';
+  activeAudioButton = null;
+}
+
+function speak(text, button = null) {
+  if (!('speechSynthesis' in window) || recording) return;
+  stopSpeech();
+  activeAudioButton = button;
+  if (button) button.textContent = '停止';
+  const utterance = new SpeechSynthesisUtterance(text.replace(/[#*`\[\]]/g, ''));
+  utterance.lang = 'zh-CN';
+  utterance.rate = 0.95;
+  utterance.onend = utterance.onerror = () => {
+    if (button) button.textContent = '播放';
+    if (activeAudioButton === button) activeAudioButton = null;
+  };
+  window.speechSynthesis.speak(utterance);
+}
+
+function addMessage(text, type, meta = '') {
+  const el = document.createElement('div');
+  el.className = `message ${type}`;
+  if (type.includes('assistant')) el.innerHTML = renderMarkdown(text);
+  else el.textContent = text;
+  if (meta) {
+    const footer = document.createElement('span');
+    footer.className = 'meta';
+    footer.textContent = meta;
+    if ('speechSynthesis' in window) {
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.className = 'audio-button';
+      button.textContent = '播放';
+      button.title = '朗读这条回答';
+      button.onclick = () => activeAudioButton === button ? stopSpeech() : speak(text, button);
+      footer.appendChild(button);
+    }
+    el.appendChild(footer);
+  }
+  messages.appendChild(el);
+  messages.scrollTop = messages.scrollHeight;
+  return el;
+}
+
+function renderResponse(data) {
+  if (!data || typeof data.answer !== 'string') throw new Error('invalid_response');
+  const labels = {assistant_identity:'关于我', medical_boundary:'专业边界', companion_with_knowledge:'知识库依据', companion:'陪伴回应', medical_urgent:'就医提示', mental_health_crisis:'安全支持'};
+  const modes = {fixed:'固定能力', llm:'模型生成', fallback:'本地降级'};
+  const execution = data.execution || {};
+  const meta = [labels[data.route] || '回复', modes[execution.mode] || '历史回复'].join(' · ');
+  return addMessage(data.answer, data.status === 'supported' ? 'assistant supported' : 'assistant refused', meta);
+}
+
+function renderCitations(items) {
+  $('#citations').innerHTML = items.length ? items.map((c, i) => `<article class="citation"><span class="citation-score">${Number(c.score).toFixed(2)}</span><div class="citation-title">[${i + 1}] ${escapeHtml(c.name)}</div><small>${escapeHtml(c.chunk_id)}</small><blockquote>${escapeHtml(c.text)}</blockquote></article>`).join('') : '<div class="empty-evidence">本次没有使用知识库证据。</div>';
+}
+
+function updateControls() {
+  const blocked = busy || !ready;
+  $('#ask-form .send').disabled = blocked || recording;
+  $('#clear-chat').disabled = blocked || recording;
+  query.disabled = blocked;
+  $('#voice-btn').disabled = blocked || !Recognition;
+  document.querySelectorAll('.suggestions button').forEach(button => { button.disabled = blocked || recording; });
+}
+
+async function loadSession() {
+  const state = await api('/api/session');
+  revision = state.revision;
+  messages.innerHTML = state.messages.length ? '' : welcome;
+  let citations = [];
+  for (const item of state.messages) {
+    if (item.role === 'user') addMessage(item.content, 'user');
+    else if (item.response) {
+      renderResponse(item.response);
+      citations = item.response.citations || [];
+    }
+  }
+  renderCitations(citations);
+  ready = true;
+  updateControls();
+}
+
+$('#ask-form').addEventListener('submit', async (event) => {
+  event.preventDefault();
+  const text = query.value.trim();
+  if (!text || busy || !ready || recording) return;
+  if (text.length > 500) return toast('每次最多发送 500 字，请分开说。');
+  stopSpeech();
+  if (!retryRequest || retryRequest.query !== text) {
+    retryRequest = {query:text, revision, request_id:crypto.randomUUID()};
+  }
+  busy = true;
+  updateControls();
+  $('.welcome')?.remove();
+  const user = addMessage(text, 'user');
+  const pending = addMessage('正在回复…', 'assistant');
+  try {
+    const data = await api('/api/ask', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(retryRequest)});
+    if (typeof data.answer !== 'string') throw new Error('invalid_response');
+    pending.remove();
+    revision = data.revision;
+    retryRequest = null;
+    query.value = '';
+    renderResponse(data);
+    renderCitations(data.citations || []);
+    if (speechEnabled) speak(data.answer);
+  } catch (error) {
+    pending.remove();
+    user.remove();
+    if (error.status === 409) {
+      retryRequest = null;
+      await loadSession().catch(() => { ready = false; });
+      toast('会话已更新，草稿保留；请确认后重新发送。');
+    } else toast('暂时无法完成，草稿已保留，可以重试。');
+  } finally {
+    busy = false;
+    updateControls();
+  }
+});
+
+messages.addEventListener('click', event => {
+  const button = event.target.closest('.suggestions button');
+  if (!button || busy || !ready) return;
+  query.value = button.textContent.trim();
+  $('#ask-form').requestSubmit();
+});
+
+$('#clear-chat').onclick = async () => {
+  if (busy || recording || !confirm('删除本地保存的这段会话？知识库不会被删除。')) return;
+  busy = true; updateControls(); stopSpeech();
+  try {
+    await api('/api/session/clear', {method:'POST'});
+    retryRequest = null;
+    query.value = '';
+    await loadSession();
+    toast('会话已删除');
+  } catch { toast('删除失败，请重试'); }
+  finally { busy = false; updateControls(); }
+};
+
+async function loadDocs() {
+  const data = await api('/api/docs');
+  $('#doc-count').textContent = data.docs.length;
+  $('#chunk-count').textContent = data.docs.reduce((n, doc) => n + doc.chunks, 0);
+  $('#doc-list').innerHTML = data.docs.map(doc => `<div class="doc"><div class="doc-name">${escapeHtml(doc.name)}</div><div class="doc-meta">${doc.chunks} 个分块</div></div>`).join('') || '<div class="empty-evidence">还没有文档。</div>';
+}
+
+async function upload(files) {
+  if (!files.length) return;
+  const form = new FormData();
+  [...files].forEach(file => form.append('files', file));
+  try {
+    const data = await api('/api/upload', {method:'POST', body:form});
+    toast(data.added?.length ? `已导入 ${data.added.length} 篇文档` : '没有可导入的 Markdown 文件');
+    await loadDocs();
+  } catch { toast('导入失败，请重试'); }
+}
+$('#file-input').onchange = event => upload(event.target.files);
+const dropzone = $('#dropzone');
+['dragenter', 'dragover', 'dragleave', 'drop'].forEach(name => dropzone.addEventListener(name, event => {
+  event.preventDefault();
+  dropzone.classList.toggle('drag', name === 'dragenter' || name === 'dragover');
+}));
+dropzone.addEventListener('drop', event => upload(event.dataTransfer.files));
+$('#reset-btn').onclick = async () => {
+  if (!confirm('确定清空全部知识库？会话不会被删除。')) return;
+  try { await api('/api/reset', {method:'POST'}); await loadDocs(); }
+  catch { toast('清空失败，请重试'); }
+};
+
 const overlay = $('#settings-overlay');
-$('#settings-open').addEventListener('click', async () => { overlay.classList.add('open'); overlay.setAttribute('aria-hidden', 'false'); const config = await (await fetch('/api/config')).json(); $('#llm-base').value = config.llm_base_url || ''; $('#llm-model').value = config.llm_model || ''; $('#embedding-base').value = config.embedding_base_url || ''; $('#embedding-model').value = config.embedding_model || ''; $('#llm-key').placeholder = config.llm_api_key ? `当前：${config.llm_api_key}` : '留空则保持当前配置'; $('#embedding-key').placeholder = config.embedding_api_key ? `当前：${config.embedding_api_key}` : '默认复用 LLM API Key'; });
-$('#settings-close').addEventListener('click', () => { overlay.classList.remove('open'); overlay.setAttribute('aria-hidden', 'true'); });
-$('#settings-form').addEventListener('submit', async (event) => { event.preventDefault(); const payload = {LLM_BASE_URL:$('#llm-base').value, LLM_MODEL:$('#llm-model').value, EMBEDDING_BASE_URL:$('#embedding-base').value, EMBEDDING_MODEL:$('#embedding-model').value}; if ($('#llm-key').value) payload.LLM_API_KEY = $('#llm-key').value; if ($('#embedding-key').value) payload.EMBEDDING_API_KEY = $('#embedding-key').value; const res = await fetch('/api/config', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload)}); const data = await res.json(); if (!res.ok) return toast(data.error || '配置保存失败'); $('#llm-key').value = ''; $('#embedding-key').value = ''; toast('配置已保存，仅当前进程生效'); });
-$('#config-test').addEventListener('click', async () => { const status = $('#config-status'); status.textContent = '正在测试…'; const res = await fetch('/api/config/test', {method:'POST'}); const data = await res.json(); status.textContent = `LLM ${data.llm ? '已连接' : '未连接'} · Embedding ${data.embedding ? '已连接' : '未连接'}`; });
+$('#settings-open').onclick = async () => {
+  overlay.classList.add('open'); overlay.setAttribute('aria-hidden', 'false');
+  try {
+    const config = await api('/api/config');
+    for (const kind of ['llm', 'embedding']) {
+      $(`#${kind}-base`).value = config[`${kind}_base_url`] || '';
+      $(`#${kind}-model`).value = config[`${kind}_model`] || '';
+      $(`#${kind}-key`).value = '';
+      $(`#${kind}-key`).placeholder = config[`${kind}_api_key`] ? '已配置，留空保留' : '未配置';
+    }
+  } catch { toast('配置读取失败'); }
+};
+$('#settings-close').onclick = () => {
+  overlay.classList.remove('open'); overlay.setAttribute('aria-hidden', 'true');
+  $('#llm-key').value = ''; $('#embedding-key').value = '';
+};
+$('#settings-form').onsubmit = async event => {
+  event.preventDefault();
+  const payload = {};
+  for (const kind of ['llm', 'embedding']) {
+    payload[`${kind.toUpperCase()}_BASE_URL`] = $(`#${kind}-base`).value.trim();
+    payload[`${kind.toUpperCase()}_MODEL`] = $(`#${kind}-model`).value.trim();
+    if ($(`#${kind}-key`).value) payload[`${kind.toUpperCase()}_API_KEY`] = $(`#${kind}-key`).value;
+  }
+  try {
+    await api('/api/config', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload)});
+    $('#llm-key').value = ''; $('#embedding-key').value = '';
+    toast('配置已保存，仅本次服务进程生效');
+  } catch { toast('配置保存失败，请检查服务地址'); }
+};
+$('#config-test').onclick = async () => {
+  $('#config-status').textContent = '正在测试已保存配置…';
+  try {
+    const data = await api('/api/config/test', {method:'POST'});
+    $('#config-status').textContent = `LLM ${data.llm ? '已连接' : '未连接'} · Embedding ${data.embedding ? '已连接' : '未连接'}`;
+  } catch { $('#config-status').textContent = '连接测试失败'; }
+};
 
 const voiceBtn = $('#voice-btn');
 const speechStatus = $('#speech-status-text');
 const speechToggle = $('#speech-toggle');
-if (SpeechRecognition) {
-  recognition = new SpeechRecognition(); recognition.lang = 'zh-CN'; recognition.interimResults = true; recognition.continuous = false;
-  recognition.onstart = () => { listening = true; voiceBtn.classList.add('listening'); voiceBtn.title = '点击停止语音输入'; speechStatus.textContent = '正在听你说…'; };
-  recognition.onresult = (event) => { let transcript = ''; for (let i = event.resultIndex; i < event.results.length; i++) transcript += event.results[i][0].transcript; query.value = transcript; submitVoiceResult = event.results[event.results.length - 1].isFinal && !!transcript.trim(); };
-  recognition.onerror = (event) => { submitVoiceResult = false; const errors = {not_allowed:'请允许浏览器使用麦克风', 'no-speech':'没有听清，可以再试一次', network:'语音识别服务暂时不可用'}; toast(errors[event.error] || '语音输入暂时不可用'); };
-  recognition.onend = () => { listening = false; voiceBtn.classList.remove('listening'); voiceBtn.title = '点击开始语音输入'; speechStatus.textContent = '语音输入已就绪'; if (submitVoiceResult && query.value.trim()) { submitVoiceResult = false; $('#ask-form').requestSubmit(); } };
-  voiceBtn.addEventListener('click', () => { if (listening) { submitVoiceResult = false; recognition.stop(); } else { query.value = ''; submitVoiceResult = false; recognition.start(); } });
+if (Recognition) {
+  recognition = new Recognition();
+  recognition.lang = 'zh-CN'; recognition.interimResults = true; recognition.continuous = false;
+  recognition.onstart = () => { speechStatus.textContent = '正在听…'; };
+  recognition.onresult = event => {
+    if (voiceCancelled) return;
+    const transcript = Array.from(event.results, result => result[0].transcript).join('');
+    query.value = (voiceDraft + (voiceDraft ? ' ' : '') + transcript).slice(0, 500);
+  };
+  recognition.onerror = event => {
+    voiceCancelled = true;
+    toast(event.error === 'not-allowed' ? '麦克风权限未开启' : '语音识别未完成，文字已保留');
+  };
+  recognition.onend = () => {
+    recording = false; voiceBtn.classList.remove('listening');
+    speechStatus.textContent = '语音输入已就绪';
+    voiceBtn.setAttribute('aria-pressed', 'false');
+    updateControls(); query.focus();
+  };
+  voiceBtn.onclick = () => {
+    if (recording) { voiceCancelled = true; recognition.abort(); return; }
+    if (busy || !ready) return;
+    stopSpeech(); voiceDraft = query.value; voiceCancelled = false; recording = true;
+    voiceBtn.classList.add('listening'); voiceBtn.setAttribute('aria-pressed', 'true');
+    updateControls();
+    try { recognition.start(); }
+    catch { recording = false; voiceBtn.classList.remove('listening'); updateControls(); toast('语音暂时不可用'); }
+  };
   speechStatus.textContent = '语音输入已就绪';
-} else {
-  voiceBtn.disabled = true; voiceBtn.title = '当前浏览器不支持语音识别'; speechStatus.textContent = '可朗读回答';
-}
-if (!('speechSynthesis' in window)) { speechEnabled = false; speechToggle.disabled = true; speechToggle.textContent = '朗读不可用'; }
-speechToggle.addEventListener('click', () => { speechEnabled = !speechEnabled; speechToggle.textContent = `朗读：${speechEnabled ? '开' : '关'}`; speechToggle.setAttribute('aria-pressed', String(speechEnabled)); speechToggle.title = speechEnabled ? '关闭回答朗读' : '开启回答朗读'; if (!speechEnabled) window.speechSynthesis?.cancel(); });
+} else speechStatus.textContent = '当前浏览器不支持语音输入';
+speechToggle.textContent = '自动朗读：关';
+speechToggle.setAttribute('aria-pressed', 'false');
+speechToggle.disabled = !('speechSynthesis' in window);
+speechToggle.onclick = () => {
+  speechEnabled = !speechEnabled;
+  speechToggle.textContent = `自动朗读：${speechEnabled ? '开' : '关'}`;
+  speechToggle.setAttribute('aria-pressed', String(speechEnabled));
+  if (!speechEnabled) stopSpeech();
+};
+window.addEventListener('pagehide', () => { voiceCancelled = true; recognition?.abort(); stopSpeech(); });
+updateControls();
+loadDocs().catch(() => toast('知识库读取失败'));
+loadSession().catch(() => toast('会话读取失败，请刷新重试'));

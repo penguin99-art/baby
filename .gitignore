@@ -3,6 +3,7 @@ __pycache__/
 .DS_Store
 data/knowledge.json
 data/*.tmp
+data/*.sqlite3*
 .env
 .env.*
 !.env.example
