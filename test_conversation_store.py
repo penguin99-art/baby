@@ -1,5 +1,6 @@
 """Tests for ConversationStore (stdlib SQLite conversation persistence)."""
 
+import json
 import os
 import sqlite3
 import tempfile
@@ -10,12 +11,15 @@ import unittest
 from conversation_store import ConversationStore, ConversationConflict
 
 
-def make_result(content, route="default", response=None):
-    return {
+def make_result(content, route="default", response=None, state=None):
+    result = {
         "content": content,
         "route": route,
         "response": response if response is not None else {"text": content},
     }
+    if state is not None:
+        result["state"] = state
+    return result
 
 
 class ConversationStoreTest(unittest.TestCase):
@@ -329,6 +333,270 @@ class ConversationStoreTest(unittest.TestCase):
         self.assertEqual(data["messages"][1]["content"], "a1")
         self.assertEqual(data["messages"][1]["route"], "r")
         self.assertEqual(data["messages"][1]["response"], {"body": "b"})
+
+    # ------------------------------------------------------------------
+    # with_state support
+    # ------------------------------------------------------------------
+
+    def test_with_state_old_data_defaults_empty(self):
+        store = self._store()
+        captured = {}
+
+        def gen(h, state):
+            captured["state"] = state
+            return make_result("a1", state={"count": 1})
+
+        ret = store.turn("tok", "r1", 0, "q1", gen, with_state=True)
+        self.assertEqual(captured["state"], {})
+        self.assertEqual(ret["result"]["state"], {"count": 1})
+
+    def test_with_state_survives_more_than_three_turns(self):
+        store = self._store()
+        for i in range(6):
+            store.turn(
+                "tok", "r%d" % i, i, "q%d" % i,
+                lambda h, s, i=i: make_result("a%d" % i, state={"count": i + 1}),
+                with_state=True,
+            )
+        captured = {}
+
+        def gen(h, state):
+            captured["state"] = state
+            return make_result("final", state={"count": 99})
+
+        store.turn("tok", "r6", 6, "q6", gen, with_state=True)
+        self.assertEqual(captured["state"], {"count": 6})
+
+    def test_with_state_restart(self):
+        store = self._store()
+        store.turn(
+            "tok", "r1", 0, "q1",
+            lambda h, s: make_result("a1", state={"count": 1}),
+            with_state=True,
+        )
+        store.close()
+        store2 = self._store()
+        captured = {}
+
+        def gen(h, state):
+            captured["state"] = state
+            return make_result("a2", state={"count": 2})
+
+        store2.turn("tok", "r2", 1, "q2", gen, with_state=True)
+        self.assertEqual(captured["state"], {"count": 1})
+
+    def test_with_state_clear_resets(self):
+        store = self._store()
+        store.turn(
+            "tok", "r1", 0, "q1",
+            lambda h, s: make_result("a1", state={"count": 1}),
+            with_state=True,
+        )
+        store.clear("tok")
+        captured = {}
+
+        def gen(h, state):
+            captured["state"] = state
+            return make_result("a2", state={"count": 2})
+
+        store.turn("tok", "r2", 2, "q2", gen, with_state=True)
+        self.assertEqual(captured["state"], {})
+
+    def test_with_state_expiry_resets(self):
+        store = self._store(ttl_seconds=0.1)
+        store.turn(
+            "tok", "r1", 0, "q1",
+            lambda h, s: make_result("a1", state={"count": 1}),
+            with_state=True,
+        )
+        time.sleep(0.3)
+        captured = {}
+
+        def gen(h, state):
+            captured["state"] = state
+            return make_result("a2", state={"count": 2})
+
+        store.turn("tok", "r2", 0, "q2", gen, with_state=True)
+        self.assertEqual(captured["state"], {})
+
+    def test_with_state_isolation(self):
+        store = self._store()
+        store.turn(
+            "alice", "r1", 0, "q1",
+            lambda h, s: make_result("a1", state={"who": "alice"}),
+            with_state=True,
+        )
+        store.turn(
+            "bob", "r1", 0, "q1",
+            lambda h, s: make_result("b1", state={"who": "bob"}),
+            with_state=True,
+        )
+        captured = {}
+
+        def gen(h, state):
+            captured["state"] = state
+            return make_result("a2", state={"who": "alice2"})
+
+        store.turn("alice", "r2", 1, "q2", gen, with_state=True)
+        self.assertEqual(captured["state"], {"who": "alice"})
+
+    def test_with_state_duplicate_request_does_not_update(self):
+        store = self._store()
+        calls = []
+
+        def gen(h, state):
+            calls.append(1)
+            return make_result("a1", state={"count": 1})
+
+        first = store.turn("tok", "r1", 0, "q1", gen, with_state=True)
+        second = store.turn("tok", "r1", 0, "q1", gen, with_state=True)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(first["result"]["state"], {"count": 1})
+        self.assertEqual(second["result"]["state"], {"count": 1})
+        captured = {}
+
+        def gen2(h, state):
+            captured["state"] = state
+            return make_result("a2", state={"count": 2})
+
+        store.turn("tok", "r2", 1, "q2", gen2, with_state=True)
+        self.assertEqual(captured["state"], {"count": 1})
+
+    def test_with_state_callback_failure_no_write(self):
+        store = self._store()
+
+        def bad_gen(h, state):
+            raise RuntimeError("boom")
+
+        with self.assertRaises(RuntimeError):
+            store.turn("tok", "r1", 0, "q1", bad_gen, with_state=True)
+        data = store.get("tok")
+        self.assertEqual(data["revision"], 0)
+        self.assertEqual(data["messages"], [])
+        ok = store.turn(
+            "tok", "r1", 0, "q1",
+            lambda h, s: make_result("a1", state={"count": 1}),
+            with_state=True,
+        )
+        self.assertEqual(ok["revision"], 1)
+
+    def test_with_state_illegal_result_no_write(self):
+        store = self._store()
+        with self.assertRaises(TypeError):
+            store.turn("tok", "r1", 0, "q1", lambda h, s: "nope", with_state=True)
+        with self.assertRaises(TypeError):
+            store.turn(
+                "tok", "r1", 0, "q1",
+                lambda h, s: make_result("a1"),
+                with_state=True,
+            )
+        with self.assertRaises(TypeError):
+            store.turn(
+                "tok", "r1", 0, "q1",
+                lambda h, s: make_result("a1", state="nope"),
+                with_state=True,
+            )
+        data = store.get("tok")
+        self.assertEqual(data["revision"], 0)
+        self.assertEqual(data["messages"], [])
+
+    def test_with_state_history_has_no_state(self):
+        store = self._store()
+        store.turn(
+            "tok", "r1", 0, "q1",
+            lambda h, s: make_result("a1", route="r1", state={"count": 1}),
+            with_state=True,
+        )
+        captured = {}
+
+        def gen(h, state):
+            captured["history"] = h
+            return make_result("a2", state={"count": 2})
+
+        store.turn("tok", "r2", 1, "q2", gen, with_state=True)
+        hist = captured["history"]
+        self.assertEqual(len(hist), 2)
+        self.assertEqual(hist[0], {"role": "user", "content": "q1"})
+        self.assertEqual(hist[1], {"role": "assistant", "content": "a1", "route": "r1"})
+        self.assertNotIn("state", hist[1])
+
+    def test_with_state_messages_hide_state(self):
+        store = self._store()
+        store.turn(
+            "tok", "r1", 0, "q1",
+            lambda h, s: make_result(
+                "a1", route="r", response={"body": "b"}, state={"count": 1}
+            ),
+            with_state=True,
+        )
+        data = store.get("tok")
+        self.assertEqual(data["messages"][1]["role"], "assistant")
+        self.assertEqual(data["messages"][1]["content"], "a1")
+        self.assertEqual(data["messages"][1]["route"], "r")
+        self.assertEqual(data["messages"][1]["response"], {"body": "b"})
+        self.assertNotIn("state", data["messages"][1])
+
+    def test_with_state_mutation_does_not_pollute(self):
+        store = self._store()
+        store.turn(
+            "tok", "r1", 0, "q1",
+            lambda h, s: make_result("a1", state={"count": 1, "items": [1]}),
+            with_state=True,
+        )
+
+        def gen(h, state):
+            state["count"] = 999
+            state["items"].append(999)
+            return make_result("a2", state={"count": 2})
+
+        store.turn("tok", "r2", 1, "q2", gen, with_state=True)
+        # the state passed to gen was a deep copy: r1's stored state is intact
+        store.close()
+        conn = sqlite3.connect(self.path)
+        try:
+            row = conn.execute(
+                "SELECT result_json FROM turns WHERE request_id = 'r1'"
+            ).fetchone()
+            self.assertEqual(
+                json.loads(row[0])["state"], {"count": 1, "items": [1]}
+            )
+        finally:
+            conn.close()
+        # mutating the returned result copy does not pollute the stored state
+        ret = store.turn(
+            "tok", "r3", 2, "q3",
+            lambda h, s: make_result("a3", state={"count": 3}),
+            with_state=True,
+        )
+        ret["result"]["state"]["count"] = 777
+        cached = store.turn(
+            "tok", "r3", 2, "q3",
+            lambda h, s: make_result("never"),
+            with_state=True,
+        )
+        self.assertEqual(cached["result"]["state"], {"count": 3})
+
+    def test_with_state_false_keeps_old_contract(self):
+        store = self._store()
+        store.turn(
+            "tok", "r1", 0, "q1",
+            lambda h, s: make_result("a1", state={"count": 1}),
+            with_state=True,
+        )
+        captured = {}
+
+        def gen(h):
+            captured["history"] = h
+            return make_result("a2")
+
+        ret = store.turn("tok", "r2", 1, "q2", gen)  # with_state defaults False
+        self.assertEqual(len(captured["history"]), 2)
+        self.assertEqual(
+            captured["history"][1],
+            {"role": "assistant", "content": "a1", "route": "default"},
+        )
+        self.assertNotIn("state", captured["history"][1])
+        self.assertNotIn("state", ret["result"])
 
 
 if __name__ == "__main__":

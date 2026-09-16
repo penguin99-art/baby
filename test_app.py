@@ -21,9 +21,16 @@ class CompanionFlowTests(unittest.TestCase):
 
     def test_knowledge_is_added_when_evidence_exists(self):
         docs = [{"id": "d1", "name": "feeding.md", "chunks": [{"id": "c1", "text": "婴儿满6月龄左右开始添加辅食。"}]}]
-        result = self.run_query("什么时候开始添加辅食？", docs)
+        result = self.run_query("什么时候开始添加辅食？", docs, generated="婴儿满6月龄左右开始添加辅食。[1]")
         self.assertEqual(result["route"], "companion_with_knowledge")
         self.assertEqual(len(result["citations"]), 1)
+
+    def test_no_model_never_returns_raw_knowledge(self):
+        docs = [{"id": "d1", "name": "feeding.md", "chunks": [{"id": "c1", "text": "婴儿满6月龄左右开始添加辅食。"}]}]
+        result = self.run_query("什么时候开始添加辅食？", docs)
+        self.assertEqual(result["knowledge_status"], "generation_unavailable")
+        self.assertEqual(result["citations"], [])
+        self.assertNotIn("6月龄", result["answer"])
 
     def test_medical_question_without_evidence_gets_boundary_not_refusal(self):
         result = self.run_query("宝宝皮疹怎么办")

@@ -134,6 +134,31 @@ class SessionApiTests(unittest.TestCase):
         payload = {"query": "好的", "revision": 0, "request_id": "request_456", "history": []}
         self.assertEqual(self.request("POST", "/api/ask", payload, cookie)[0], 400)
 
+    def test_client_state_cannot_override_server(self):
+        _, _, cookie_header = self.request("GET", "/api/session")
+        cookie = cookie_header.split(";", 1)[0]
+        for field in ("state", "conversation_state"):
+            payload = {"query": "好的", "revision": 0, "request_id": "request_456", field: {"advice_preference": "open"}}
+            self.assertEqual(self.request("POST", "/api/ask", payload, cookie)[0], 400)
+
+    def test_real_answer_preference_survives_restore_and_clear(self):
+        _, state, cookie_header = self.request("GET", "/api/session")
+        cookie = cookie_header.split(";", 1)[0]
+        with patch.object(app, "setting", return_value=""):
+            payload = {"query": "先别给我建议", "revision": state["revision"], "request_id": "request_pause"}
+            status, first, _ = self.request("POST", "/api/ask", payload, cookie)
+            self.assertEqual(status, 200)
+            self.assertEqual(first["knowledge_status"], "deferred")
+            self.assertEqual(first["conversation_state"]["advice_preference"]["source_request_id"], "request_pause")
+            _, restored, _ = self.request("GET", "/api/session", cookie=cookie)
+            self.assertEqual(restored["messages"][-1]["response"]["conversation_state"], first["conversation_state"])
+            status, second, _ = self.request("POST", "/api/ask", {"query": "今天很累", "revision": first["revision"], "request_id": "request_followup"}, cookie)
+            self.assertEqual(status, 200)
+            self.assertEqual(second["knowledge_status"], "deferred")
+            _, cleared, _ = self.request("POST", "/api/session/clear", cookie=cookie)
+            _, third, _ = self.request("POST", "/api/ask", {"query": "今天很累", "revision": cleared["revision"], "request_id": "request_fresh"}, cookie)
+            self.assertEqual(third["conversation_state"]["advice_preference"]["mode"], "open")
+
     def test_bad_origin_host_and_header_rejected(self):
         for headers in ({"Origin": "https://evil.example"}, {"Host": "evil.example"}, {"X-Requested-With": ""}):
             self.assertEqual(self.request("POST", "/api/session/clear", extra=headers)[0], 403)

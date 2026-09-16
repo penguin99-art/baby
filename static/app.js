@@ -107,12 +107,13 @@ function renderResponse(data) {
   const labels = {assistant_identity:'关于我', medical_boundary:'专业边界', companion_with_knowledge:'知识库依据', companion:'陪伴回应', medical_urgent:'就医提示', mental_health_crisis:'安全支持'};
   const modes = {fixed:'固定能力', llm:'模型生成', fallback:'本地降级'};
   const execution = data.execution || {};
-  const meta = [labels[data.route] || '回复', modes[execution.mode] || '历史回复'].join(' · ');
+  const knowledge = {deferred:'倾听优先', insufficient_evidence:'依据不足', generation_unavailable:'知识回答暂不可用', output_blocked:'输出已拦截'};
+  const meta = [labels[data.route] || '回复', modes[execution.mode] || '历史回复', knowledge[data.knowledge_status]].filter(Boolean).join(' · ');
   return addMessage(data.answer, data.status === 'supported' ? 'assistant supported' : 'assistant refused', meta);
 }
 
 function renderCitations(items) {
-  $('#citations').innerHTML = items.length ? items.map((c, i) => `<article class="citation"><span class="citation-score">${Number(c.score).toFixed(2)}</span><div class="citation-title">[${i + 1}] ${escapeHtml(c.name)}</div><small>${escapeHtml(c.chunk_id)}</small><blockquote>${escapeHtml(c.text)}</blockquote></article>`).join('') : '<div class="empty-evidence">本次没有使用知识库证据。</div>';
+  $('#citations').innerHTML = items.length ? items.map((c, i) => `<article class="citation"><span class="citation-score">${Number(c.score).toFixed(2)}</span><div class="citation-title">[${escapeHtml(c.citation_number || i + 1)}] ${escapeHtml(c.name)}</div><small>${escapeHtml(c.chunk_id)}</small><blockquote>${escapeHtml(c.text)}</blockquote></article>`).join('') : '<div class="empty-evidence">本次没有使用知识库证据。</div>';
 }
 
 function updateControls() {

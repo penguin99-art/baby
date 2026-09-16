@@ -18,6 +18,12 @@ Design notes / limitations
 * ``generate(history)`` receives the most recent 6 messages (the last 3
   turns: user + assistant). Each message carries only ``role`` and
   ``content[:1000]``; assistant messages also carry ``route``.
+* With ``turn(..., with_state=True)`` the callback is invoked as
+  ``generate(history, state)`` where ``state`` is a deep copy of the
+  top-level ``state`` dict stored with the latest turn (``{}`` when there
+  is none). The callback must then return a dict that also contains a
+  ``state`` dict. State is persisted inside the same ``result_json`` (no
+  extra DB columns) and is never merged into history or messages.
 * The callback result is ``{"content": ..., "route": ...,
   "response": ...}`` where ``response`` wraps the app's existing result
   unchanged; assistant messages persist all three fields for UI recovery.
@@ -59,6 +65,8 @@ class ConversationStore:
     The ``generate`` callback must return ``{"content", "route",
     "response"}`` where ``response`` wraps the app's existing result
     unchanged; assistant messages persist all three fields for UI recovery.
+    With ``with_state=True`` the callback is ``generate(history, state)``
+    and must additionally return a ``state`` dict.
     """
 
     def __init__(self, path, ttl_seconds=86400):
@@ -191,8 +199,28 @@ class ConversationStore:
             )
         return history
 
+    def _get_latest_state(self, session_id):
+        """Top-level ``state`` dict of the most recent turn.
+
+        Old records written without state support default to ``{}``. Only
+        the latest turn is read (state is not derived from history).
+        """
+        row = self._conn().execute(
+            "SELECT result_json FROM turns"
+            " WHERE session_id = ? ORDER BY revision DESC LIMIT 1",
+            (session_id,),
+        ).fetchone()
+        if row is None:
+            return {}
+        state = json.loads(row["result_json"]).get("state", {})
+        return state if isinstance(state, dict) else {}
+
     def _rebuild_messages(self, session_id):
-        """Rebuild the full message list from stored turns (by revision)."""
+        """Rebuild the full message list from stored turns (by revision).
+
+        The internal top-level ``state`` key is kept out of the messages;
+        ``response`` (and any other app fields) still pass through.
+        """
         rows = self._conn().execute(
             "SELECT query, result_json FROM turns"
             " WHERE session_id = ? ORDER BY revision ASC",
@@ -202,7 +230,11 @@ class ConversationStore:
         for row in rows:
             messages.append({"role": "user", "content": row["query"]})
             assistant = {"role": "assistant"}
-            assistant.update(json.loads(row["result_json"]))
+            result = json.loads(row["result_json"])
+            for key, value in result.items():
+                if key == "state":
+                    continue
+                assistant[key] = value
             messages.append(assistant)
         return messages
 
@@ -250,7 +282,7 @@ class ConversationStore:
                 raise
             return {"revision": new_revision, "messages": []}
 
-    def turn(self, token, request_id, expected_revision, query, generate):
+    def turn(self, token, request_id, expected_revision, query, generate, *, with_state=False):
         """Run one turn of a conversation.
 
         ``generate(history)`` receives the most recent 6 messages (the last
@@ -259,6 +291,15 @@ class ConversationStore:
         return a result dict ``{"content": ..., "route": ...,
         "response": ...}`` where ``response`` wraps the app's existing
         result unchanged.
+
+        With ``with_state=True`` the callback is invoked as
+        ``generate(history, state)`` where ``state`` is a deep copy of the
+        top-level ``state`` dict stored with the latest turn (``{}`` when
+        there is none). The callback must then return a dict that also
+        contains a ``state`` dict; otherwise :class:`TypeError` is raised
+        and nothing is written. The state is persisted inside the same
+        ``result_json`` (no extra DB columns) and is never merged into
+        history or messages.
 
         Returns ``{"result": dict, "revision": int, "request_id": str}``.
 
@@ -305,9 +346,19 @@ class ConversationStore:
                 )
 
             history = self._build_history(session_id)
-            result = generate(history)  # may raise; nothing is committed then
-            if not isinstance(result, dict):
-                raise TypeError("generate() must return a dict")
+            if with_state:
+                state = self._get_latest_state(session_id)
+                result = generate(history, deepcopy(state))  # may raise
+                if not isinstance(result, dict):
+                    raise TypeError("generate() must return a dict")
+                if not isinstance(result.get("state"), dict):
+                    raise TypeError(
+                        "generate() must return a dict with a 'state' dict"
+                    )
+            else:
+                result = generate(history)  # may raise; nothing is committed then
+                if not isinstance(result, dict):
+                    raise TypeError("generate() must return a dict")
 
             new_revision = session["revision"] + 1
             conn = self._conn()
