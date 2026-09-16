@@ -7,12 +7,14 @@ import uuid
 import threading
 import secrets
 import logging
+import stat
 from http.cookies import SimpleCookie
 from urllib.error import HTTPError
 from conversation_plan import ConversationPlan
 from conversation_store import ConversationStore, ConversationConflict
 from conversation_state import update_state, preference_change, wants_to_close, asks_for_information, listening_reply
 from response_policy import check_output
+from auth_store import AuthStore, AuthError
 from email.parser import BytesParser
 from email.policy import default
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -22,7 +24,7 @@ from urllib.request import Request, urlopen
 
 
 ROOT = Path(__file__).parent
-DATA_DIR = ROOT / "data"
+DATA_DIR = Path(os.getenv("BABY_DATA_DIR", str(ROOT / "data"))).resolve()
 STATIC_DIR = ROOT / "static"
 STORE = DATA_DIR / "knowledge.json"
 SUPPORTED = {".md"}
@@ -33,7 +35,37 @@ STORE_LOCK = threading.Lock()
 CONFIG_LOCK = threading.Lock()
 APP_CONFIG: dict[str, str] = {}
 CONVERSATIONS = ConversationStore(DATA_DIR / "conversations.sqlite3")
+AUTH = AuthStore(DATA_DIR / "accounts.sqlite3")
 MODEL_EVENTS = threading.local()
+
+
+def prepare_bootstrap(auth_store):
+    """Keep the first-admin capability local, outside HTTP responses and logs."""
+    if auth_store.is_initialized():
+        return None
+    path = Path(auth_store.path).parent / "setup-token.txt"
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    try:
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError:
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        with os.fdopen(fd, "r", encoding="ascii") as handle:
+            metadata = os.fstat(handle.fileno())
+            if not stat.S_ISREG(metadata.st_mode) or metadata.st_mode & 0o077:
+                raise RuntimeError("setup-token.txt must be a private regular file (0600)")
+            token = handle.read(129).strip()
+        if not re.fullmatch(r"[A-Za-z0-9_-]{43}", token):
+            raise RuntimeError("invalid setup-token.txt")
+    else:
+        token = secrets.token_urlsafe(32)
+        with os.fdopen(fd, "w", encoding="ascii") as handle:
+            handle.write(token + "\n")
+    auth_store.setup_token = token
+    return path
+
+
+def conversation_key(user):
+    return "account:" + user["id"]
 
 
 def model_event(stage: str, outcome: str) -> None:
@@ -42,7 +74,7 @@ def model_event(stage: str, outcome: str) -> None:
 
 
 def ensure_store() -> list[dict]:
-    DATA_DIR.mkdir(exist_ok=True)
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
     if not STORE.exists():
         STORE.write_text("[]", encoding="utf-8")
     try:
@@ -52,7 +84,7 @@ def ensure_store() -> list[dict]:
 
 
 def save_store(docs: list[dict]) -> None:
-    DATA_DIR.mkdir(exist_ok=True)
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
     temporary = STORE.with_suffix(".tmp")
     temporary.write_text(json.dumps(docs, ensure_ascii=False, indent=2), encoding="utf-8")
     temporary.replace(STORE)
@@ -463,6 +495,12 @@ def public_config() -> dict:
 
 
 class Handler(BaseHTTPRequestHandler):
+    def end_headers(self):
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("X-Frame-Options", "DENY")
+        self.send_header("Referrer-Policy", "no-referrer")
+        super().end_headers()
+
     def local_request(self) -> bool:
         port = self.server.server_port
         hosts = {f"localhost:{port}", f"127.0.0.1:{port}"}
@@ -473,26 +511,54 @@ class Handler(BaseHTTPRequestHandler):
             return False
         return True
 
-    def session_token(self, create=False):
+    @property
+    def auth_cookie_name(self):
+        return f"baby_auth_{self.server.server_port}"
+
+    def auth_token(self):
         cookie = SimpleCookie()
         try:
             cookie.load(self.headers.get("Cookie", ""))
-            value = cookie.get("baby_session")
+            value = cookie.get(self.auth_cookie_name)
             if value and re.fullmatch(r"[A-Za-z0-9_-]{43}", value.value):
                 return value.value
         except Exception:
             pass
-        if create:
-            token = secrets.token_urlsafe(32)
-            self.new_session_cookie = f"baby_session={token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=86400"
-            return token
         return None
+
+    def set_auth_cookie(self, token=None):
+        age = int(AUTH.session_ttl) if token else 0
+        self.new_session_cookie = f"{self.auth_cookie_name}={token or ''}; HttpOnly; SameSite=Strict; Path=/; Max-Age={age}"
+
+    def require_user(self, *, admin=False, allow_password_change=False):
+        user = AUTH.authenticate(self.auth_token())
+        if user is None:
+            self.set_auth_cookie()
+            raise AuthError("authentication_required", 401)
+        if user["must_change_password"] and not allow_password_change:
+            raise AuthError("password_change_required", 403)
+        if admin and user["role"] != "admin":
+            raise AuthError("forbidden", 403)
+        return user
+
+    @staticmethod
+    def json_payload(body, fields):
+        try:
+            payload = json.loads(body or b"{}")
+        except (ValueError, UnicodeError):
+            raise AuthError("invalid_json", 400)
+        if not isinstance(payload, dict) or set(payload) != set(fields):
+            raise AuthError("invalid_fields", 400)
+        return payload
 
     def finish(self):
         try:
             super().finish()
         finally:
-            CONVERSATIONS.close()
+            try:
+                CONVERSATIONS.close()
+            finally:
+                AUTH.close()
 
     def send_json(self, payload: dict, code: int = 200) -> None:
         data = json.dumps(payload, ensure_ascii=False).encode()
@@ -506,14 +572,36 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     def do_GET(self) -> None:
+        try:
+            self.handle_get()
+        except AuthError as error:
+            self.send_json({"error": error.code}, error.status)
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+        except Exception as error:
+            logging.error("GET request failed: %s", type(error).__name__)
+            self.send_json({"error": "service_unavailable"}, 503)
+
+    def handle_get(self):
         if not self.local_request():
             return
         path = urlparse(self.path).path
-        if path == "/api/session":
+        if path.startswith("/api/"):
             if self.headers.get("X-Requested-With") != "BabyAssistant":
                 self.send_json({"error": "request_header_required"}, 403)
                 return
-            self.send_json(CONVERSATIONS.get(self.session_token(create=True)))
+            if path == "/api/auth/me":
+                user = AUTH.authenticate(self.auth_token())
+                if user is None and self.auth_token():
+                    self.set_auth_cookie()
+                self.send_json({"user": user, "setup_required": not AUTH.is_initialized(), "bootstrap_available": bool(AUTH.setup_token) and not AUTH.is_initialized()})
+                return
+            user = self.require_user(admin=path in {"/api/config", "/api/admin/users"})
+        if path == "/api/session":
+            self.send_json(CONVERSATIONS.get(conversation_key(user)))
+            return
+        if path == "/api/admin/users":
+            self.send_json({"users": AUTH.list_users(user["id"])})
             return
         if path == "/api/docs":
             docs = ensure_store()
@@ -529,34 +617,88 @@ class Handler(BaseHTTPRequestHandler):
             self.send_response(200)
             self.send_header("Content-Type", content_type)
             self.send_header("Content-Length", str(len(data)))
+            self.send_header("Cache-Control", "no-store")
             self.end_headers()
             self.wfile.write(data)
             return
         self.send_json({"error": "not found"}, 404)
 
     def do_POST(self) -> None:
+        try:
+            self.handle_post()
+        except AuthError as error:
+            if error.status == 401:
+                self.set_auth_cookie()
+            self.send_json({"error": error.code}, error.status)
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+        except Exception as error:
+            logging.error("POST request failed: %s", type(error).__name__)
+            self.send_json({"error": "service_unavailable"}, 503)
+
+    def handle_post(self):
         if not self.local_request():
             return
         if self.headers.get("X-Requested-With") != "BabyAssistant":
             self.send_json({"error": "request_header_required"}, 403)
             return
+        path = urlparse(self.path).path
+        public_paths = {"/api/auth/login", "/api/auth/bootstrap", "/api/auth/logout"}
+        if path not in public_paths:
+            admin = path.startswith("/api/admin/") or path in {"/api/config", "/api/config/test", "/api/upload", "/api/reset"}
+            user = self.require_user(admin=admin, allow_password_change=path == "/api/auth/password")
         try:
             length = int(self.headers.get("Content-Length", 0))
         except ValueError:
             self.send_json({"error": "invalid content length"}, 400)
             return
-        if length < 0 or length > MAX_UPLOAD:
+        if length < 0 or length > (MAX_UPLOAD if path == "/api/upload" else 16384):
             self.send_json({"error": "upload too large"}, 413)
             return
         body = self.rfile.read(length)
-        path = urlparse(self.path).path
-        docs = ensure_store()
+        if path == "/api/auth/bootstrap":
+            payload = self.json_payload(body, ("setup_token", "username", "password"))
+            AUTH.bootstrap(payload["username"], payload["password"], payload["setup_token"])
+            try:
+                (Path(AUTH.path).parent / "setup-token.txt").unlink(missing_ok=True)
+            except OSError:
+                logging.warning("could not remove used bootstrap token file")
+            self.send_json({"ok": True}, 201)
+            return
+        if path == "/api/auth/login":
+            payload = self.json_payload(body, ("username", "password"))
+            token, user = AUTH.login(payload["username"], payload["password"], self.client_address[0])
+            AUTH.logout(self.auth_token())
+            self.set_auth_cookie(token)
+            self.send_json({"user": user})
+            return
+        if path == "/api/auth/logout":
+            self.json_payload(body, ())
+            AUTH.logout(self.auth_token())
+            self.set_auth_cookie()
+            self.send_json({"ok": True})
+            return
+        if path == "/api/auth/password":
+            payload = self.json_payload(body, ("current_password", "new_password"))
+            AUTH.change_password(self.auth_token(), payload["current_password"], payload["new_password"])
+            self.set_auth_cookie()
+            self.send_json({"ok": True})
+            return
+        if path == "/api/admin/users":
+            payload = self.json_payload(body, ("username", "password"))
+            self.send_json({"user": AUTH.create_user(user["id"], payload["username"], payload["password"])}, 201)
+            return
+        if path == "/api/admin/users/status":
+            payload = self.json_payload(body, ("user_id", "active"))
+            self.send_json({"user": AUTH.set_active(user["id"], payload["user_id"], payload["active"])})
+            return
+        if path == "/api/admin/users/password":
+            payload = self.json_payload(body, ("user_id", "password"))
+            self.send_json({"user": AUTH.reset_password(user["id"], payload["user_id"], payload["password"])})
+            return
         if path == "/api/session/clear":
-            token = self.session_token()
-            if not token:
-                self.send_json({"error": "session_required"}, 409)
-                return
-            self.send_json(CONVERSATIONS.clear(token))
+            self.json_payload(body, ())
+            self.send_json(CONVERSATIONS.clear(conversation_key(user)))
             return
         if path == "/api/ask":
             try:
@@ -570,19 +712,22 @@ class Handler(BaseHTTPRequestHandler):
                 return
             request_id = payload.get("request_id")
             revision = payload.get("revision")
-            if any(key in payload for key in ("history", "state", "conversation_state")) or not isinstance(request_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{8,80}", request_id) or type(revision) is not int or revision < 0:
+            if set(payload) != {"query", "request_id", "revision"} or not isinstance(request_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{8,80}", request_id) or type(revision) is not int or revision < 0:
                 self.send_json({"error": "request_id and revision required; client history/state not accepted"}, 400)
                 return
-            token = self.session_token()
-            if not token:
-                self.send_json({"error": "session_required"}, 409)
-                return
+            token = conversation_key(user)
+            docs = ensure_store()
             def generate(history, state):
                 response = answer(query.strip(), docs, history, state=state, request_id=request_id)
+                # Do not publish a slow model result after this login was revoked.
+                self.require_user()
                 return {"content": response["answer"], "route": response["route"], "response": response, "state": response.get("conversation_state", state)}
             try:
                 turn = CONVERSATIONS.turn(token, request_id, revision, query.strip(), generate, with_state=True)
+                self.require_user()
                 self.send_json({**turn["result"]["response"], "revision": turn["revision"], "request_id": turn["request_id"]})
+            except AuthError:
+                raise
             except ConversationConflict:
                 self.send_json({"error": "conversation_conflict"}, 409)
             except Exception as error:
@@ -592,10 +737,13 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/config":
             try:
                 payload = json.loads(body or b"{}")
-            except json.JSONDecodeError:
+            except (ValueError, UnicodeError):
                 self.send_json({"error": "invalid JSON"}, 400)
                 return
             allowed = {"LLM_BASE_URL", "LLM_API_KEY", "LLM_MODEL", "EMBEDDING_BASE_URL", "EMBEDDING_API_KEY", "EMBEDDING_MODEL"}
+            if not isinstance(payload, dict) or set(payload) - allowed or any(not isinstance(value, str) for value in payload.values()):
+                self.send_json({"error": "invalid config fields"}, 400)
+                return
             values = {key: str(payload[key]).strip() for key in allowed if key in payload and payload[key] is not None}
             for key in ("LLM_BASE_URL", "EMBEDDING_BASE_URL"):
                 if key in values and values[key] and not values[key].startswith(("http://", "https://")):
@@ -652,5 +800,8 @@ class Handler(BaseHTTPRequestHandler):
 
 if __name__ == "__main__":
     port = int(os.getenv("PORT", "8000"))
+    setup_path = prepare_bootstrap(AUTH)
+    if setup_path:
+        print(f"First administrator setup token file: {setup_path}", flush=True)
     print(f"Baby knowledge demo: http://localhost:{port}")
     ThreadingHTTPServer(("127.0.0.1", port), Handler).serve_forever()

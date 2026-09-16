@@ -2,19 +2,25 @@
 <html lang="zh-CN">
 <head>
   <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>宝妈助手 · 情绪陪伴</title><link rel="stylesheet" href="/styles.css">
+  <title>宝妈助手 · 情绪陪伴</title><link rel="stylesheet" href="/styles.css"><link rel="stylesheet" href="/auth.css">
 </head>
 <body>
   <header class="topbar">
     <div class="brand"><span class="brand-mark">♡</span><div><strong>宝妈助手</strong><small>情绪陪伴 · 知识问答</small></div></div>
     <div class="top-actions">
       <div class="top-status" id="speech-status" title="语音由浏览器提供，后端只接收识别后的文字"><span class="dot"></span><span id="speech-status-text">语音功能检查中…</span></div>
-      <button class="settings-button" id="settings-open">⚙ 设置</button>
+      <div class="user-chip" id="user-chip" hidden>
+        <span id="user-name"></span>
+        <span id="user-role" class="role-badge"></span>
+        <a href="/accounts.html" id="accounts-link" hidden class="settings-button">账号管理</a>
+        <button class="settings-button" id="logout-btn">退出</button>
+      </div>
+      <button class="settings-button" id="settings-open" hidden>⚙ 设置</button>
     </div>
   </header>
   <main class="layout">
     <aside class="sidebar">
-      <section class="panel import-panel">
+      <section class="panel import-panel" id="import-panel" hidden>
         <div class="eyebrow">📚 知识库</div>
         <h1>把可靠内容<br>带进来</h1>
         <p>导入后，助手只会依据这些文档作答。</p>
@@ -26,7 +32,7 @@
         </label>
       </section>
       <section class="docs-section">
-        <div class="section-head"><span>已导入文档</span><button class="text-button" id="reset-btn">🗑 清空</button></div>
+        <div class="section-head"><span>已导入文档</span><button class="text-button" id="reset-btn" hidden>🗑 清空</button></div>
         <div class="stats"><strong id="doc-count">0</strong><span>篇文档</span><i></i><strong id="chunk-count">0</strong><span>个分块</span></div>
         <div id="doc-list" class="doc-list"></div>
       </section>
@@ -59,7 +65,7 @@
             <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg>
           </button>
         </div>
-        <small id="composer-hint">语音转写后确认发送。会话本地保留 24 小时，到期后下次访问清理，可随时删除；使用模型 API 时会发送最近对话。</small>
+        <small id="composer-hint">语音转写后确认发送。会话按账号保存在本机，24 小时后自动清理，可随时删除；使用模型 API 时会发送最近对话。</small>
       </form>
     </section>
 
@@ -84,5 +90,6 @@
     </section>
   </div>
   <div id="toast" class="toast"></div>
+  <script src="/auth.js"></script>
   <script src="/app.js"></script>
 </body></html>

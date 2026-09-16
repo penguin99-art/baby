@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>账号管理 · 宝妈助手</title>
+  <link rel="stylesheet" href="/styles.css">
+  <link rel="stylesheet" href="/auth.css">
+</head>
+<body class="auth-body">
+  <main class="accounts-card">
+    <header class="accounts-head">
+      <div class="auth-brand"><span class="brand-mark">♡</span><div><strong>宝妈助手</strong><small>情绪陪伴 · 知识问答</small></div></div>
+      <div class="top-actions">
+        <a class="settings-button" href="/index.html">返回助手</a>
+        <button class="settings-button" id="logout-btn">退出登录</button>
+      </div>
+    </header>
+
+    <h1>账号管理</h1>
+    <p class="auth-sub">创建体验账号，或禁用、重置已有账号。账号只能由管理员创建，没有公开注册。</p>
+
+    <form id="create-form" class="create-form">
+      <input id="new-username" placeholder="用户名（3-32 位，小写字母/数字/._-）" autocomplete="off" required>
+      <input id="new-password" type="password" placeholder="初始密码（12-128 位）" autocomplete="new-password" minlength="12" required>
+      <button class="primary-button" type="submit">创建账号</button>
+    </form>
+    <p id="create-error" class="auth-error" hidden></p>
+
+    <table class="users-table">
+      <thead><tr><th>用户名</th><th>角色</th><th>状态</th><th>创建时间</th><th></th></tr></thead>
+      <tbody id="users-body"></tbody>
+    </table>
+  </main>
+  <script src="/auth.js"></script>
+  <script src="/accounts.js"></script>
+</body>
+</html>

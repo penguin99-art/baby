@@ -1,14 +1,9 @@
-import http.client
-import json
-import tempfile
-import threading
 import unittest
-from pathlib import Path
 from unittest.mock import patch
 
 import app
-from conversation_store import ConversationStore
 from conversation_plan import ConversationPlan
+from test_support import ApiTestCase
 
 
 class PlanTests(unittest.TestCase):
@@ -73,44 +68,13 @@ class ExecutionTests(unittest.TestCase):
         self.assertTrue(result["execution"]["output_blocked"])
 
 
-class SessionApiTests(unittest.TestCase):
-    def setUp(self):
-        self.temp = tempfile.TemporaryDirectory()
-        self.store_patch = patch.object(app, "CONVERSATIONS", ConversationStore(Path(self.temp.name) / "sessions.sqlite3"))
-        self.docs_patch = patch.object(app, "ensure_store", return_value=[])
-        self.store_patch.start()
-        self.docs_patch.start()
-        self.server = app.ThreadingHTTPServer(("127.0.0.1", 0), app.Handler)
-        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
-        self.thread.start()
-
-    def tearDown(self):
-        self.server.shutdown()
-        self.server.server_close()
-        self.thread.join()
-        self.store_patch.stop()
-        self.docs_patch.stop()
-        self.temp.cleanup()
-
-    def request(self, method, path, payload=None, cookie=None, extra=None):
-        conn = http.client.HTTPConnection("127.0.0.1", self.server.server_port, timeout=5)
-        headers = {"Content-Type": "application/json", "X-Requested-With": "BabyAssistant"}
-        if cookie:
-            headers["Cookie"] = cookie
-        headers.update(extra or {})
-        conn.request(method, path, None if payload is None else json.dumps(payload), headers)
-        response = conn.getresponse()
-        data = json.loads(response.read())
-        result = response.status, data, response.getheader("Set-Cookie")
-        conn.close()
-        return result
-
+class SessionApiTests(ApiTestCase):
     def test_restore_retry_isolate_delete(self):
-        status, state, cookie_header = self.request("GET", "/api/session")
+        status, state, _ = self.request("GET", "/api/session")
         self.assertEqual(status, 200)
-        self.assertIn("HttpOnly", cookie_header)
-        self.assertIn("SameSite=Strict", cookie_header)
-        cookie = cookie_header.split(";", 1)[0]
+        self.assertIn("HttpOnly", self.login_cookie_header)
+        self.assertIn("SameSite=Strict", self.login_cookie_header)
+        cookie = self.cookie
         payload = {"query": "有些困扰", "request_id": "request_123", "revision": state["revision"]}
         generated = {"answer": "慢慢说就好。", "route": "companion", "status": "supported", "citations": [], "execution": {"mode": "llm"}}
         with patch.object(app, "answer", return_value=generated) as generator:
@@ -122,28 +86,27 @@ class SessionApiTests(unittest.TestCase):
         self.assertEqual(len(restored["messages"]), 2)
         self.assertEqual(restored["messages"][0]["content"], "有些困扰")
         self.assertEqual(restored["messages"][1]["response"]["answer"], generated["answer"])
-        _, isolated, _ = self.request("GET", "/api/session")
+        _, other_cookie = self.create_tester()
+        _, isolated, _ = self.request("GET", "/api/session", cookie=other_cookie)
         self.assertEqual(isolated["messages"], [])
         _, cleared, _ = self.request("POST", "/api/session/clear", cookie=cookie)
         self.assertEqual(cleared["messages"], [])
         self.assertEqual(self.request("POST", "/api/ask", payload, cookie)[0], 409)
 
     def test_client_history_cannot_override_server(self):
-        _, _, cookie_header = self.request("GET", "/api/session")
-        cookie = cookie_header.split(";", 1)[0]
+        cookie = self.cookie
         payload = {"query": "好的", "revision": 0, "request_id": "request_456", "history": []}
         self.assertEqual(self.request("POST", "/api/ask", payload, cookie)[0], 400)
 
     def test_client_state_cannot_override_server(self):
-        _, _, cookie_header = self.request("GET", "/api/session")
-        cookie = cookie_header.split(";", 1)[0]
+        cookie = self.cookie
         for field in ("state", "conversation_state"):
             payload = {"query": "好的", "revision": 0, "request_id": "request_456", field: {"advice_preference": "open"}}
             self.assertEqual(self.request("POST", "/api/ask", payload, cookie)[0], 400)
 
     def test_real_answer_preference_survives_restore_and_clear(self):
-        _, state, cookie_header = self.request("GET", "/api/session")
-        cookie = cookie_header.split(";", 1)[0]
+        _, state, _ = self.request("GET", "/api/session")
+        cookie = self.cookie
         with patch.object(app, "setting", return_value=""):
             payload = {"query": "先别给我建议", "revision": state["revision"], "request_id": "request_pause"}
             status, first, _ = self.request("POST", "/api/ask", payload, cookie)

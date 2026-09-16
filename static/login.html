@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>登录 · 宝妈助手</title>
+  <link rel="stylesheet" href="/styles.css">
+  <link rel="stylesheet" href="/auth.css">
+</head>
+<body class="auth-body">
+  <main class="auth-card">
+    <div class="auth-brand"><span class="brand-mark">♡</span><div><strong>宝妈助手</strong><small>情绪陪伴 · 知识问答</small></div></div>
+
+    <section id="view-login" hidden>
+      <h1>欢迎回来</h1>
+      <p class="auth-sub">使用管理员为你创建的账号登录。</p>
+      <form id="login-form">
+        <label>用户名<input id="login-username" autocomplete="username" required></label>
+        <label>密码<input id="login-password" type="password" autocomplete="current-password" required></label>
+        <button class="primary-button auth-submit" type="submit">登录</button>
+      </form>
+      <p id="login-error" class="auth-error" hidden></p>
+    </section>
+
+    <section id="view-change" hidden>
+      <h1>设置新密码</h1>
+      <p class="auth-sub">首次登录需要先设置自己的密码，之后才能使用助手。</p>
+      <form id="change-form">
+        <label>当前密码<input id="change-current" type="password" autocomplete="current-password" required></label>
+        <label>新密码<input id="change-new" type="password" autocomplete="new-password" minlength="12" required></label>
+        <label>确认新密码<input id="change-confirm" type="password" autocomplete="new-password" minlength="12" required></label>
+        <button class="primary-button auth-submit" type="submit">保存新密码</button>
+      </form>
+      <p id="change-error" class="auth-error" hidden></p>
+    </section>
+
+    <section id="view-bootstrap" hidden>
+      <h1>初始化管理员</h1>
+      <p class="auth-sub">首次启动需要创建管理员账号。请输入服务启动时打印的 setup token。</p>
+      <form id="bootstrap-form">
+        <label>Setup Token<input id="bootstrap-token" autocomplete="off" required></label>
+        <label>管理员用户名<input id="bootstrap-username" autocomplete="username" required></label>
+        <label>密码<input id="bootstrap-password" type="password" autocomplete="new-password" minlength="12" required></label>
+        <button class="primary-button auth-submit" type="submit">创建管理员</button>
+      </form>
+      <p id="bootstrap-error" class="auth-error" hidden></p>
+    </section>
+
+    <p class="auth-foot">仅限本机访问 · 会话按账号隔离</p>
+  </main>
+  <script src="/auth.js"></script>
+  <script src="/login.js"></script>
+</body>
+</html>

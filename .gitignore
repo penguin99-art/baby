@@ -4,6 +4,7 @@ __pycache__/
 data/knowledge.json
 data/*.tmp
 data/*.sqlite3*
+data/setup-token.txt
 .env
 .env.*
 !.env.example

@@ -22,26 +22,30 @@ python3 app.py
 
 打开 http://localhost:8000。当前只支持导入 `.md`，数据保存在 `data/knowledge.json`。
 
+首次启动会生成一个一次性 setup token 文件 `data/setup-token.txt`（权限 0600），并在终端打印路径。打开登录页后选择“初始化管理员”，输入该 token 创建第一个管理员账号；创建成功后 token 文件会被删除。之后管理员在“账号管理”页创建体验账号，普通账号首次登录必须设置自己的密码。
+
 页面支持浏览器原生中文语音输入和回答朗读。语音识别的可用性及语音数据处理方式取决于浏览器实现；应用后端只接收识别后的文字，不接收或保存录音文件。
 
 语音转写后需确认发送，自动朗读默认关闭；关闭自动朗读后仍可手动播放单条回复。录音取消保留已有草稿。
 
-## 会话与验证
+## 账号与会话
 
-浏览器通过 HttpOnly / SameSite Cookie 访问本地 SQLite 会话。刷新页面或重启同一个服务后可恢复历史；会话在创建后 24 小时过期，下次请求时清理。页面的“删除会话”立即删除该会话历史，不删除知识库。数据文件 `data/conversations.sqlite3` 被 Git 忽略，但本地明文存储，不适合直接公开部署。
+服务只监听本机，采用邀请式账号：没有公开注册，账号只能由管理员创建。管理员可以禁用账号或重置密码；禁用和重置会立即吊销该账号的所有登录会话。管理员还可以配置模型 API、导入/清空知识库；普通账号只能使用助手并查看知识库列表。
 
-启用模型 API 后，最近对话会发送给供应商。当前没有账号系统、跨设备同步或长期健康画像。请只运行一个服务进程；SQLite 的会话串行锁不是多进程锁。`localhost` 与 `127.0.0.1` 是不同 Cookie 来源，请固定使用一种地址。
+浏览器通过 HttpOnly / SameSite Cookie 访问本地 SQLite 会话。会话按账号隔离，每个账号只能看到自己的对话；刷新页面或重启同一个服务后可恢复历史；会话在创建后 24 小时过期，下次请求时清理。页面的“删除会话”立即删除该账号的会话历史，不删除知识库。数据文件 `data/conversations.sqlite3` 和 `data/accounts.sqlite3` 被 Git 忽略，但本地明文存储，不适合直接公开部署。
+
+启用模型 API 后，最近对话会发送给供应商。当前没有跨设备同步或长期健康画像。请只运行一个服务进程；SQLite 的会话串行锁不是多进程锁。`localhost` 与 `127.0.0.1` 是不同 Cookie 来源，请固定使用一种地址。
 
 每条回复区分“模型生成 / 本地降级 / 固定能力”。`execution` 记录 planner 和 generator 的调用结果，包含未配置、超时、上游失败和输出阻断，不记录密钥或原始上游错误。
 
 “先别给我建议”会保存为当前会话的倾听偏好，刷新、重启和超过 3 轮后仍保留；“现在可以给我建议了”恢复。明确知识追问可单轮回答，不自动清除暂停偏好；删除会话同时清除偏好。当前采用明确子句规则和固定倾听回复，并非完整语义记忆。
 
 ```bash
-python3 -m unittest -v test_app test_conversation_store test_session_api test_fusion
-node --check static/app.js
+python3 -m unittest -v test_app test_conversation_store test_session_api test_fusion test_auth_api
+node --check static/app.js static/auth.js static/login.js static/accounts.js
 ```
 
-API 变更：先 `GET /api/session` 获得 Cookie 与 revision，再 `POST /api/ask` 提交 `query`、`request_id`、`revision`；不再接受客户端 `history`。所有 POST 必须带 `X-Requested-With: BabyAssistant`。重复 ID 与相同内容返回缓存，不同内容或旧 revision 返回 409。`POST /api/session/clear` 删除会话。当前仅支持实际服务端口的 localhost / 127.0.0.1，限制跨站请求；这些限制不是生产鉴权的替代。
+API 变更：先 `GET /api/auth/me` 确认登录状态，再 `GET /api/session` 获得 revision，然后 `POST /api/ask` 提交 `query`、`request_id`、`revision`；不再接受客户端 `history`。所有 API 请求必须带 `X-Requested-With: BabyAssistant`。重复 ID 与相同内容返回缓存，不同内容或旧 revision 返回 409。`POST /api/session/clear` 删除当前账号会话。`/api/config`、`/api/upload`、`/api/reset` 和 `/api/admin/*` 仅管理员可用。当前仅支持实际服务端口的 localhost / 127.0.0.1，限制跨站请求；这些限制不是生产鉴权的替代。
 
 历史设计参考：[v4](docs/宝妈助手目标技术架构-v4.md)、[v5](docs/现状对照与前沿迭代方案-v5.md)。后续实施以本文顶部的 v6 文档为准。
 

@@ -13,6 +13,7 @@ let voiceCancelled = false;
 let voiceDraft = '';
 let speechEnabled = false;
 let activeAudioButton = null;
+let currentUser = null;
 
 function toast(text) {
   const el = $('#toast');
@@ -21,28 +22,10 @@ function toast(text) {
   setTimeout(() => el.classList.remove('show'), 3000);
 }
 
-async function api(path, options = {}) {
-  const res = await fetch(path, {
-    ...options,
-    headers: {'X-Requested-With': 'BabyAssistant', ...options.headers},
-  });
-  let data;
-  try { data = await res.json(); }
-  catch {
-    const error = new Error('invalid_response');
-    error.status = res.status;
-    throw error;
-  }
-  if (!res.ok) {
-    const error = new Error(data.error || 'request_failed');
-    error.status = res.status;
-    throw error;
-  }
-  return data;
-}
-
-function escapeHtml(value) {
-  return String(value).replace(/[&<>'"]/g, c => ({'&':'&amp;', '<':'&lt;', '>':'&gt;', "'":'&#39;', '"':'&quot;'}[c]));
+function authFailure(error) {
+  if (error.status === 401 || error.code === 'password_change_required') { redirectToLogin(); return true; }
+  if (error.status === 403) { toast('没有权限执行此操作'); return true; }
+  return false;
 }
 
 function renderMarkdown(text) {
@@ -125,6 +108,41 @@ function updateControls() {
   document.querySelectorAll('.suggestions button').forEach(button => { button.disabled = blocked || recording; });
 }
 
+function applyRole(user) {
+  const admin = user.role === 'admin';
+  $('#settings-open').hidden = !admin;
+  $('#import-panel').hidden = !admin;
+  $('#reset-btn').hidden = !admin;
+  $('#accounts-link').hidden = !admin;
+  $('#user-chip').hidden = false;
+  $('#user-name').textContent = user.username;
+  $('#user-role').textContent = admin ? '管理员' : '体验账号';
+}
+
+function wipeSensitiveDom() {
+  messages.innerHTML = '';
+  $('#citations').innerHTML = '';
+  $('#doc-list').innerHTML = '';
+  $('#doc-count').textContent = '0';
+  $('#chunk-count').textContent = '0';
+  query.value = '';
+  retryRequest = null;
+  revision = 0;
+  ready = false;
+  stopSpeech();
+}
+
+async function revalidateSession() {
+  if (!currentUser) return;
+  try {
+    const status = await getMe();
+    if (!status.user || status.user.id !== currentUser.id) {
+      wipeSensitiveDom();
+      redirectToLogin();
+    }
+  } catch {}
+}
+
 async function loadSession() {
   const state = await api('/api/session');
   revision = state.revision;
@@ -169,9 +187,11 @@ $('#ask-form').addEventListener('submit', async (event) => {
   } catch (error) {
     pending.remove();
     user.remove();
+    if (authFailure(error)) return;
     if (error.status === 409) {
       retryRequest = null;
-      await loadSession().catch(() => { ready = false; });
+      try { await loadSession(); }
+      catch (loadError) { if (authFailure(loadError)) return; ready = false; }
       toast('会话已更新，草稿保留；请确认后重新发送。');
     } else toast('暂时无法完成，草稿已保留，可以重试。');
   } finally {
@@ -196,7 +216,7 @@ $('#clear-chat').onclick = async () => {
     query.value = '';
     await loadSession();
     toast('会话已删除');
-  } catch { toast('删除失败，请重试'); }
+  } catch (error) { if (authFailure(error)) return; toast('删除失败，请重试'); }
   finally { busy = false; updateControls(); }
 };
 
@@ -215,7 +235,7 @@ async function upload(files) {
     const data = await api('/api/upload', {method:'POST', body:form});
     toast(data.added?.length ? `已导入 ${data.added.length} 篇文档` : '没有可导入的 Markdown 文件');
     await loadDocs();
-  } catch { toast('导入失败，请重试'); }
+  } catch (error) { if (authFailure(error)) return; toast('导入失败，请重试'); }
 }
 $('#file-input').onchange = event => upload(event.target.files);
 const dropzone = $('#dropzone');
@@ -227,7 +247,7 @@ dropzone.addEventListener('drop', event => upload(event.dataTransfer.files));
 $('#reset-btn').onclick = async () => {
   if (!confirm('确定清空全部知识库？会话不会被删除。')) return;
   try { await api('/api/reset', {method:'POST'}); await loadDocs(); }
-  catch { toast('清空失败，请重试'); }
+  catch (error) { if (authFailure(error)) return; toast('清空失败，请重试'); }
 };
 
 const overlay = $('#settings-overlay');
@@ -241,7 +261,7 @@ $('#settings-open').onclick = async () => {
       $(`#${kind}-key`).value = '';
       $(`#${kind}-key`).placeholder = config[`${kind}_api_key`] ? '已配置，留空保留' : '未配置';
     }
-  } catch { toast('配置读取失败'); }
+  } catch (error) { if (authFailure(error)) return; toast('配置读取失败'); }
 };
 $('#settings-close').onclick = () => {
   overlay.classList.remove('open'); overlay.setAttribute('aria-hidden', 'true');
@@ -259,14 +279,14 @@ $('#settings-form').onsubmit = async event => {
     await api('/api/config', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload)});
     $('#llm-key').value = ''; $('#embedding-key').value = '';
     toast('配置已保存，仅本次服务进程生效');
-  } catch { toast('配置保存失败，请检查服务地址'); }
+  } catch (error) { if (authFailure(error)) return; toast('配置保存失败，请检查服务地址'); }
 };
 $('#config-test').onclick = async () => {
   $('#config-status').textContent = '正在测试已保存配置…';
   try {
     const data = await api('/api/config/test', {method:'POST'});
     $('#config-status').textContent = `LLM ${data.llm ? '已连接' : '未连接'} · Embedding ${data.embedding ? '已连接' : '未连接'}`;
-  } catch { $('#config-status').textContent = '连接测试失败'; }
+  } catch (error) { if (authFailure(error)) return; $('#config-status').textContent = '连接测试失败'; }
 };
 
 const voiceBtn = $('#voice-btn');
@@ -312,6 +332,17 @@ speechToggle.onclick = () => {
   if (!speechEnabled) stopSpeech();
 };
 window.addEventListener('pagehide', () => { voiceCancelled = true; recognition?.abort(); stopSpeech(); });
+window.addEventListener('pageshow', revalidateSession);
+document.addEventListener('visibilitychange', () => { if (!document.hidden) revalidateSession(); });
+$('#logout-btn').onclick = async () => {
+  wipeSensitiveDom();
+  await logoutAndRedirect();
+};
 updateControls();
-loadDocs().catch(() => toast('知识库读取失败'));
-loadSession().catch(() => toast('会话读取失败，请刷新重试'));
+authReady.then(user => {
+  if (!user || user.must_change_password) { redirectToLogin(); return; }
+  currentUser = user;
+  applyRole(user);
+  loadDocs().catch(error => { if (authFailure(error)) return; toast('知识库读取失败'); });
+  loadSession().catch(error => { if (authFailure(error)) return; toast('会话读取失败，请刷新重试'); });
+});

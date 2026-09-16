@@ -1,0 +1,28 @@
+[hidden]{display:none!important}
+.auth-body{min-height:100vh;display:grid;place-items:center;padding:32px 16px;background:linear-gradient(160deg,#faf7f2 0%,#f3ece2 100%)}
+.auth-card,.accounts-card{width:100%;max-width:420px;background:var(--surface);border:1px solid var(--line);border-radius:18px;box-shadow:0 18px 50px rgba(43,38,34,.08);padding:34px 34px 26px}
+.accounts-card{max-width:760px}
+.auth-brand{display:flex;gap:12px;align-items:center;margin-bottom:26px}
+.auth-brand .brand-mark{width:38px;height:38px;border-radius:11px;background:var(--trust);color:#fff;display:grid;place-items:center;font-weight:700;font-family:serif}
+.auth-brand strong{display:block;font-size:15px}
+.auth-brand small{display:block;color:var(--muted);font-size:11px;margin-top:2px}
+.auth-card h1,.accounts-card h1{font:700 26px/1.3 Georgia,"Songti SC",serif;margin:0 0 6px}
+.auth-sub{color:var(--muted);font-size:12px;line-height:1.7;margin:0 0 20px}
+.auth-card form label{display:block;color:var(--muted);font-size:11px;font-weight:600;margin:14px 0 0}
+.auth-card form input{display:block;width:100%;margin-top:6px;padding:11px 12px;border:1px solid var(--line);border-radius:9px;font-size:14px;background:var(--surface);color:var(--ink)}
+.auth-card form input:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 3px rgba(217,108,79,.12)}
+.auth-submit{width:100%;margin:22px 0 0;padding:12px;font-size:13px;border-radius:9px}
+.auth-error{color:var(--accent2);font-size:12px;margin:14px 0 0;line-height:1.6}
+.auth-foot{color:var(--muted);font-size:11px;text-align:center;margin:22px 0 0}
+.accounts-head{display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid var(--line);padding-bottom:18px;margin-bottom:24px}
+.accounts-head .auth-brand{margin-bottom:0}
+.create-form{display:flex;gap:10px;flex-wrap:wrap;margin:0 0 6px}
+.create-form input{flex:1 1 200px;padding:11px 12px;border:1px solid var(--line);border-radius:9px;font-size:13px;background:var(--surface);color:var(--ink)}
+.create-form input:focus{outline:none;border-color:var(--accent)}
+.users-table{width:100%;border-collapse:collapse;margin-top:18px;font-size:13px}
+.users-table th{text-align:left;color:var(--muted);font-size:11px;font-weight:600;padding:8px 10px;border-bottom:1px solid var(--line)}
+.users-table td{padding:11px 10px;border-bottom:1px solid var(--line)}
+.row-actions{white-space:nowrap;text-align:right}
+.row-actions .text-button{margin-left:8px}
+.muted{color:var(--muted)}
+@media(max-width:560px){.accounts-head{flex-direction:column;gap:14px;align-items:flex-start}}
